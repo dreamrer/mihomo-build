@@ -232,6 +232,17 @@ jobs:
                       f'set(BINARY_NAME "{win_binary}")', p.read_text()
                   ))
                   print(f'[inject] Windows BINARY_NAME → {win_binary}')
+              # Windows packaging/exe/make_config.yaml（installer 配置，executable_name 必须与 BINARY_NAME 一致）
+              p = Path('windows/packaging/exe/make_config.yaml')
+              if p.exists():
+                  import yaml as _yaml2
+                  cfg = _yaml2.safe_load(p.read_text()) or {}
+                  cfg['app_name'] = app_name
+                  cfg['display_name'] = app_name
+                  cfg['executable_name'] = f'{win_binary}.exe'
+                  cfg['output_base_file_name'] = win_binary
+                  p.write_text(_yaml2.dump(cfg, default_flow_style=False, allow_unicode=True))
+                  print(f'[inject] Windows make_config.yaml executable_name → {win_binary}.exe')
               # Windows Runner.rc（文件属性 ProductName / FileDescription）
               p = Path('windows/runner/Runner.rc')
               if p.exists():
