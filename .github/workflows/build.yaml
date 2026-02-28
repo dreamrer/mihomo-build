@@ -571,6 +571,87 @@ jobs:
             done
           fi
 
+  # ── 全部构建完成后：汇总通知 + 删除记录按钮 ─────────────────
+  final_notify:
+    needs: build
+    runs-on: ubuntu-latest
+    if: |
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.notify_chat_id != ''
+    permissions:
+      actions: write
+    steps:
+      - name: Send summary and delete-run button
+        env:
+          BOT_TOKEN: ${{ secrets.BUILD_BOT_TOKEN }}
+          CHAT_ID:   ${{ inputs.notify_chat_id }}
+          RUN_ID:    ${{ github.run_id }}
+          REPO:      ${{ github.repository }}
+          GH_TOKEN:  ${{ github.token }}
+        run: |
+          [ -z "$BOT_TOKEN" ] && echo "[final_notify] BUILD_BOT_TOKEN 未配置，跳过" && exit 0
+
+          python3 << 'EOF'
+          import os, time, requests, sys
+
+          bot   = os.environ['BOT_TOKEN']
+          chat  = os.environ['CHAT_ID']
+          rid   = os.environ['RUN_ID']
+          repo  = os.environ['REPO']
+          ght   = os.environ['GH_TOKEN']
+
+          # 发送汇总消息 + 删除按钮
+          r = requests.post(f'https://api.telegram.org/bot{bot}/sendMessage', json={
+              'chat_id': chat,
+              'text': '📦 所有平台构建完成，文件已全部发送。\n下载完成后可点击按钮清理本次打包记录。',
+              'reply_markup': {'inline_keyboard': [[
+                  {'text': '🗑 删除打包记录', 'callback_data': f'del_{rid}'}
+              ]]}
+          })
+          res = r.json()
+          if not res.get('ok'):
+              print(f'发送失败: {res}')
+              sys.exit(0)
+
+          msg_id = res['result']['message_id']
+          print('消息已发送，等待用户点击（最长 30 分钟）...')
+
+          offset = 0
+          deadline = time.time() + 1800
+
+          while time.time() < deadline:
+              try:
+                  updates = requests.get(f'https://api.telegram.org/bot{bot}/getUpdates',
+                      params={'offset': offset, 'timeout': 20,
+                              'allowed_updates': ['callback_query']}, timeout=25).json()
+              except Exception as e:
+                  print(f'getUpdates 异常: {e}')
+                  time.sleep(5)
+                  continue
+
+              for upd in updates.get('result', []):
+                  offset = upd['update_id'] + 1
+                  cb = upd.get('callback_query', {})
+                  if cb.get('data') == f'del_{rid}':
+                      # 通过 GitHub API 删除本次 run
+                      dr = requests.delete(
+                          f'https://api.github.com/repos/{repo}/actions/runs/{rid}',
+                          headers={'Authorization': f'Bearer {ght}',
+                                   'Accept': 'application/vnd.github+json',
+                                   'X-GitHub-Api-Version': '2022-11-28'})
+                      ok = dr.status_code == 204
+                      tip = '✅ 打包记录已删除' if ok else f'❌ 删除失败 ({dr.status_code})'
+                      requests.post(f'https://api.telegram.org/bot{bot}/answerCallbackQuery',
+                          json={'callback_query_id': cb['id'], 'text': tip})
+                      requests.post(f'https://api.telegram.org/bot{bot}/editMessageText',
+                          json={'chat_id': chat, 'message_id': msg_id, 'text': f'🗑 {tip}'})
+                      print(tip)
+                      sys.exit(0)
+
+          print('30 分钟超时，用户未点击，跳过')
+          EOF
+
   # ── Release：打 tag 时自动发布到本公共仓库 ──────────────────
   release:
     needs: build
