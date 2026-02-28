@@ -94,35 +94,53 @@ env:
   IS_STABLE: ${{ github.event_name == 'push' && !contains(github.ref, '-') || github.event_name != 'push' && !contains(inputs.ref, '-') }}
 
 jobs:
+  # ── 预处理：根据 inputs.platforms 动态生成矩阵 ─────────────
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set build matrix
+        id: set-matrix
+        run: |
+          python3 << 'EOF'
+          import json, os
+
+          all_items = [
+            {"platform": "android", "os": "ubuntu-latest"},
+            {"platform": "linux",   "os": "ubuntu-latest",  "arch": "amd64"},
+            {"platform": "macos",   "os": "macos-latest",   "arch": "arm64"},
+            {"platform": "macos",   "os": "macos-latest",   "arch": "amd64"},
+            {"platform": "windows", "os": "windows-latest", "arch": "amd64"},
+          ]
+
+          event_name   = os.environ.get("EVENT_NAME", "")
+          platforms_in = os.environ.get("PLATFORMS", "").strip()
+
+          if event_name == "push" or not platforms_in:
+            filtered = all_items
+          else:
+            selected = {p.strip() for p in platforms_in.split(",") if p.strip()}
+            filtered = [x for x in all_items if x["platform"] in selected]
+
+          matrix = json.dumps({"include": filtered})
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"matrix={matrix}\n")
+          EOF
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PLATFORMS:  ${{ inputs.platforms }}
+
   build:
+    needs: setup
     runs-on: ${{ matrix.os }}
-    # 仅启动被选中平台的 runner，未选中的平台直接跳过（不分配 runner）
-    if: >-
-      github.event_name == 'push' ||
-      inputs.platforms == '' ||
-      contains(inputs.platforms, matrix.platform)
     timeout-minutes: 90
     defaults:
       run:
         shell: bash
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - platform: android
-            os: ubuntu-latest
-          - platform: linux
-            os: ubuntu-latest
-            arch: amd64
-          - platform: macos
-            os: macos-latest
-            arch: arm64
-          - platform: macos
-            os: macos-latest
-            arch: amd64
-          - platform: windows
-            os: windows-latest
-            arch: amd64
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
 
     steps:
       # ── 0. 配置 git 凭据 ────────────────────────────────────
