@@ -507,6 +507,47 @@ jobs:
             ${{ matrix.arch && format('--arch {0}', matrix.arch) || '' }} \
             ${{ env.IS_STABLE == 'true' && '--env stable' || '' }}
 
+      # ── 12b. 重命名 Windows 输出文件（ASCII 名 → 完整 App 名）──
+      - name: Rename Windows dist files
+        if: matrix.platform == 'windows' && github.event_name == 'workflow_dispatch' && inputs.app_name != ''
+        env:
+          APP_NAME: ${{ inputs.app_name }}
+        run: |
+          python3 << 'PYEOF'
+          import os, re
+          from pathlib import Path
+
+          app_name = os.environ.get('APP_NAME', '').strip()
+          if not app_name:
+              print('[rename] APP_NAME not set, skipping')
+              exit(0)
+
+          # 与 inject 步骤相同的 sanitize 逻辑，得到 CMake 用的 ASCII 名
+          win_binary = re.sub(r'[\s/\\:*?"<>|]+', '_', app_name)
+          win_binary = re.sub(r'[^\x00-\x7F]+', '', win_binary)
+          win_binary = re.sub(r'[^a-zA-Z0-9_-]+', '_', win_binary).strip('_') or 'Flclash'
+
+          if win_binary == app_name:
+              print(f'[rename] binary name == app_name ("{app_name}")，无需重命名')
+              exit(0)
+
+          dist = Path('dist')
+          if not dist.exists():
+              print('[rename] dist/ 不存在，跳过')
+              exit(0)
+
+          renamed = 0
+          for f in sorted(dist.rglob('*')):
+              if f.is_file() and win_binary in f.name:
+                  new_name = f.name.replace(win_binary, app_name, 1)
+                  new_path = f.parent / new_name
+                  f.rename(new_path)
+                  print(f'[rename] {f.name} → {new_name}')
+                  renamed += 1
+
+          print(f'[rename] 共重命名 {renamed} 个文件（binary="{win_binary}", app="{app_name}"）')
+          PYEOF
+
       # ── 13. 构建结果诊断 ──────────────────────────────────────
       - name: Debug dist output
         if: always()
