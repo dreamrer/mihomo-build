@@ -223,8 +223,10 @@ jobs:
                       p.read_text()
                   ))
                   print(f'[inject] Android app_name → {app_name}')
-              # Windows CMakeLists.txt（控制 .exe 文件名，不能含空格）
+              # Windows CMakeLists.txt（控制 .exe 文件名，CMake 不支持中文/非 ASCII）
               win_binary = re.sub(r'[\s/\\:*?"<>|]+', '_', app_name)
+              win_binary = re.sub(r'[^\x00-\x7F]+', '', win_binary)   # 去掉中文等非 ASCII
+              win_binary = re.sub(r'[^a-zA-Z0-9_-]+', '_', win_binary).strip('_') or 'Flclash'
               p = Path('windows/CMakeLists.txt')
               if p.exists():
                   p.write_text(re.sub(
@@ -560,9 +562,9 @@ jobs:
           fi
 
           curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-            -d "chat_id=${CHAT_ID}" \
-            -d "text=${MSG}" \
-            -d "parse_mode=Markdown" || true
+            --data-urlencode "chat_id=${CHAT_ID}" \
+            --data-urlencode "text=${MSG}" \
+            --data-urlencode "parse_mode=Markdown" || true
 
           # 成功时逐文件发送（跳过 .sha256 等校验文件）
           if [ "$JOB_STATUS" = "success" ]; then
@@ -575,9 +577,9 @@ jobs:
                   -F "caption=📦 $(basename ${f})" || true
               else                                  # >50MB：发下载链接
                 curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-                  -d "chat_id=${CHAT_ID}" \
-                  -d "text=📦 $(basename ${f}) ($(( SIZE/1024/1024 ))MB) 超出 TG 限制，请到 [Actions](${RUN_URL}) 下载" \
-                  -d "parse_mode=Markdown" || true
+                  --data-urlencode "chat_id=${CHAT_ID}" \
+                  --data-urlencode "text=📦 $(basename ${f}) ($(( SIZE/1024/1024 ))MB) 超出 TG 限制，请到 [Actions](${RUN_URL}) 下载" \
+                  --data-urlencode "parse_mode=Markdown" || true
               fi
             done
           fi
