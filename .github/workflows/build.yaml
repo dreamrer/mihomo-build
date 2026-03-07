@@ -529,7 +529,14 @@ jobs:
           print(f'[rename] 共重命名 {renamed} 个文件（binary="{win_binary}", app="{app_name}"）')
           PYEOF
 
-      # ── 12c. Windows: Inno Setup 打包 ────────────────────────
+      # ── 12c. Windows: 下载 VC++ 运行库 ──────────────────────────
+      - name: Download VC++ Redistributable
+        if: matrix.platform == 'windows'
+        run: |
+          curl -fsSL -o vc_redist.x64.exe "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+          echo "[vc_redist] $(du -sh vc_redist.x64.exe | cut -f1)"
+
+      # ── 12d. Windows: Inno Setup 打包 ────────────────────────
       - name: Build Windows installer (Inno Setup)
         if: matrix.platform == 'windows'
         run: |
