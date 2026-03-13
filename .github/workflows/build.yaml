@@ -75,7 +75,7 @@ on:
 
       # ── 客服 & 联系方式（写入远程配置，不烧录进包）─────────
       telegram_channel:
-        description: 'TG 支持频道（如 https://t.me/xxx，写入远程配置参考）'
+        description: 'TG 订阅频道（如 https://t.me/jichangbiji，写入远程配置）'
         required: false
         default: ''
       crisp_id:
