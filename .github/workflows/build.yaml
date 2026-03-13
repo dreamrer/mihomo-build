@@ -232,6 +232,14 @@ jobs:
                   txt = re.sub(r'VALUE "FileDescription",\s*"[^"]*"', f'VALUE "FileDescription", "{app_name}"', txt)
                   p.write_text(txt, encoding='utf-8')
                   print(f'[inject] Windows ProductName → {app_name}')
+              # Windows main.cpp（Win32 窗口标题 → 任务栏显示名）
+              p = Path('windows/runner/main.cpp')
+              if p.exists():
+                  p.write_text(re.sub(
+                      r'window\.Create\(L"[^"]*"',
+                      f'window.Create(L"{win_binary}"', p.read_text()
+                  ))
+                  print(f'[inject] Windows window title → {win_binary}')
               # macOS Info.plist
               p = Path('macos/Runner/Info.plist')
               if p.exists():
