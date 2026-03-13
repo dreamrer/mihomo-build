@@ -332,21 +332,11 @@ jobs:
               print(f'[inject] config.yaml panel_type → {panel_type}')
 
           # ── 5. 替换应用图标 ─────────────────────────────────
-          # 无论是否换图标，始终删除 adaptive icon 相关文件，避免系统 mask 裁切导致图标显示异常
+          # 无论是否换图标，始终删除 adaptive icon XML，避免系统 mask 裁切导致图标显示异常
           import glob as _glob
-          # 删除 adaptive icon XML（mipmap-anydpi-v26 目录）
           for xml_f in _glob.glob('android/app/src/main/res/mipmap-anydpi*/ic_launcher*.xml'):
               Path(xml_f).unlink()
               print(f'[inject] 删除 adaptive XML: {xml_f}')
-          # 删除所有 ic_launcher_foreground 文件（防止 Android 8+ 启动器仍尝试使用 foreground 图层）
-          for fg_f in _glob.glob('android/app/src/main/res/mipmap-*/ic_launcher_foreground.*'):
-              Path(fg_f).unlink()
-              print(f'[inject] 删除 foreground: {fg_f}')
-          # 删除 adaptive icon 背景色资源（不再需要）
-          bg_xml = Path('android/app/src/main/res/values/ic_launcher_background.xml')
-          if bg_xml.exists():
-              bg_xml.unlink()
-              print(f'[inject] 删除 ic_launcher_background.xml')
 
           logo_url = env('APP_LOGO_URL')
           if logo_url:
