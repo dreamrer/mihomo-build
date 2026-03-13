@@ -82,6 +82,10 @@ on:
         description: 'Crisp 客服 ID（留空=不启用）'
         required: false
         default: ''
+      salesmartly_token:
+        description: 'Salesmartly 客服 Token（留空=不启用，优先于 Crisp）'
+        required: false
+        default: ''
 
       # ── 构建完成通知 ────────────────────────────────────────
       notify_chat_id:
