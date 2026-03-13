@@ -332,29 +332,9 @@ jobs:
               print(f'[inject] config.yaml panel_type → {panel_type}')
 
           # ── 5. 替换应用图标 ─────────────────────────────────
-          # 无论是否换图标，始终删除 adaptive icon 相关文件，避免系统 mask 裁切导致图标显示异常
+          # 仅在用户上传了自定义 Logo 时才处理 adaptive icon
+          # 不再无条件删除 adaptive icon 文件，保留原始结构
           import glob as _glob
-          # 删除 adaptive icon XML（mipmap-anydpi-v26 目录）
-          for xml_f in _glob.glob('android/app/src/main/res/mipmap-anydpi*/ic_launcher*.xml'):
-              Path(xml_f).unlink()
-              print(f'[inject] 删除 adaptive XML: {xml_f}')
-          # 删除所有 ic_launcher_foreground 文件（防止 Android 8+ 启动器仍尝试使用 foreground 图层）
-          for fg_f in _glob.glob('android/app/src/main/res/mipmap-*/ic_launcher_foreground.*'):
-              Path(fg_f).unlink()
-              print(f'[inject] 删除 foreground: {fg_f}')
-          # 删除 adaptive icon 背景色资源（不再需要）
-          bg_xml = Path('android/app/src/main/res/values/ic_launcher_background.xml')
-          if bg_xml.exists():
-              bg_xml.unlink()
-              print(f'[inject] 删除 ic_launcher_background.xml')
-          # 同步修复 values-v27/styles.xml 中对已删除颜色资源的引用
-          v27_styles = Path('android/app/src/main/res/values-v27/styles.xml')
-          if v27_styles.exists():
-              txt = v27_styles.read_text()
-              if '@color/ic_launcher_background' in txt:
-                  txt = txt.replace('@color/ic_launcher_background', '#FAFAFA')
-                  v27_styles.write_text(txt)
-                  print('[inject] 修复 values-v27/styles.xml → 硬编码 #FAFAFA')
 
           logo_url = env('APP_LOGO_URL')
           if logo_url:
@@ -388,23 +368,44 @@ jobs:
                       return result
 
                   # ── Android mipmap ──────────────────────────
-                  # 如果图标有透明背景（RGBA），合成到白色底图，避免 Android 显示纯黑
+                  # Android 图标不加圆角（系统启动器会自动做 mask 裁切）
+                  # 仅做 resize + 合成白底（防止透明背景在某些启动器上显示为纯黑）
                   def _android_icon(src, size):
                       ri = src.resize((size, size), Image.LANCZOS)
-                      ri = _round_corners(ri)
                       if ri.mode == 'RGBA':
                           bg = Image.new('RGBA', ri.size, (255, 255, 255, 255))
                           bg.paste(ri, mask=ri.split()[3])
                           return bg.convert('RGB')
-                      return ri
+                      return ri.convert('RGB')
 
-                  # mipmap-anydpi-v26 也需要替换：Android 8+ 优先使用 anydpi 目录
-                  # 若源码中该目录存有 WEBP 文件（非 XML），不替换会导致用户上传的图标不生效
+                  # 用户上传了自定义 Logo 时：
+                  # 1. 删除 adaptive icon XML（mipmap-anydpi-v26），让系统回退到普通 mipmap
+                  # 2. 删除 foreground 图层文件
+                  # 3. 删除 ic_launcher_background 颜色资源
+                  # 这样 Android 会直接使用我们替换的 webp/png 图标
+                  for xml_f in _glob.glob('android/app/src/main/res/mipmap-anydpi*/ic_launcher*.xml'):
+                      Path(xml_f).unlink()
+                      print(f'[inject] 删除 adaptive XML: {xml_f}')
+                  for fg_f in _glob.glob('android/app/src/main/res/mipmap-*/ic_launcher_foreground.*'):
+                      Path(fg_f).unlink()
+                      print(f'[inject] 删除 foreground: {fg_f}')
+                  bg_xml = Path('android/app/src/main/res/values/ic_launcher_background.xml')
+                  if bg_xml.exists():
+                      bg_xml.unlink()
+                      print(f'[inject] 删除 ic_launcher_background.xml')
+                  # 修复 values-v27/styles.xml 中对已删除颜色资源的引用
+                  v27_styles = Path('android/app/src/main/res/values-v27/styles.xml')
+                  if v27_styles.exists():
+                      txt = v27_styles.read_text()
+                      if '@color/ic_launcher_background' in txt:
+                          txt = txt.replace('@color/ic_launcher_background', '#FAFAFA')
+                          v27_styles.write_text(txt)
+                          print('[inject] 修复 values-v27/styles.xml → 硬编码 #FAFAFA')
+
                   for folder, size in {
                       'mipmap-mdpi': 48, 'mipmap-hdpi': 72,
                       'mipmap-xhdpi': 96, 'mipmap-xxhdpi': 144,
                       'mipmap-xxxhdpi': 192,
-                      'mipmap-anydpi-v26': 192,  # Android 8+ 优先此目录
                   }.items():
                       base = Path(f'android/app/src/main/res/{folder}')
                       if not base.exists():
