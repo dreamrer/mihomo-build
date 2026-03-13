@@ -347,6 +347,14 @@ jobs:
           if bg_xml.exists():
               bg_xml.unlink()
               print(f'[inject] 删除 ic_launcher_background.xml')
+          # 同步修复 values-v27/styles.xml 中对已删除颜色资源的引用
+          v27_styles = Path('android/app/src/main/res/values-v27/styles.xml')
+          if v27_styles.exists():
+              txt = v27_styles.read_text()
+              if '@color/ic_launcher_background' in txt:
+                  txt = txt.replace('@color/ic_launcher_background', '#FAFAFA')
+                  v27_styles.write_text(txt)
+                  print('[inject] 修复 values-v27/styles.xml → 硬编码 #FAFAFA')
 
           logo_url = env('APP_LOGO_URL')
           if logo_url:
