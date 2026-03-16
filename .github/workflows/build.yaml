@@ -386,11 +386,22 @@ jobs:
           if ver:
               p = Path('pubspec.yaml')
               txt = p.read_text()
-              # 替换 major.minor.patch（兼容有/无 +buildNumber）
-              txt = re.sub(r'^(version:\s*)[\d.]+(\+\S*)?', rf'\g<1>{ver}',
+              # Flutter 要求 version: X.Y.Z+buildNumber，缺少 +N 会导致版本不生效
+              pubspec_ver = ver if '+' in ver else f'{ver}+1'
+              txt = re.sub(r'^(version:\s*)\S+', rf'\g<1>{pubspec_ver}',
                            txt, flags=re.MULTILINE)
               p.write_text(txt)
-              print(f'[inject] pubspec version → {ver}')
+              print(f'[inject] pubspec version → {pubspec_ver}')
+
+              # 同步版本号到 release_config_plaintext.json
+              release_ver = ver.split('+')[0]  # 纯版本号，不含 buildNumber
+              cfg_file = Path('release_config_plaintext.json')
+              if cfg_file.exists():
+                  cfg_txt = cfg_file.read_text(encoding='utf-8')
+                  cfg_txt = re.sub(r'"version"\s*:\s*"[^"]*"',
+                                   f'"version": "{release_ver}"', cfg_txt)
+                  cfg_file.write_text(cfg_txt, encoding='utf-8')
+                  print(f'[inject] release_config version → {release_ver}')
 
           # ── 4. 注入 panel_type 到 assets/config/config.yaml ──
           # 注意：OSS URL 不写入 config.yaml（安装目录明文可见），
