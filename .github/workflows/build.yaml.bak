@@ -1,0 +1,868 @@
+name: Build
+
+# ============================================================
+# 公共构建仓库：仅含 workflow，私有源码通过 PAT 在 CI 内拉取。
+#
+# 必须在本仓库 Settings → Secrets and variables → Actions 中配置：
+#   PRIVATE_REPO_TOKEN  - 有私有仓库 read 权限的 PAT
+#   BUILD_BOT_TOKEN     - TG Bot Token（用于构建完成后发包，可与业务 Bot 共用）
+#
+# 【Android 正式签名（可选，不配置则用 debug 签名）】
+#   KEYSTORE            - keystore.jks 的 base64 编码
+#   KEY_ALIAS           - keystore 别名
+#   STORE_PASSWORD      - keystore 密码
+#   KEY_PASSWORD        - key 密码
+# ============================================================
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '私有仓库的 tag/branch（如 v1.0.15 或 main）'
+        required: true
+        default: 'main'
+
+      # ── 构建目标 ────────────────────────────────────────────
+      platforms:
+        description: '构建平台，逗号分隔（android,windows,linux,macos），留空=全部'
+        required: false
+        default: ''
+
+      # ── 品牌定制 ────────────────────────────────────────────
+      app_name:
+        description: 'App 显示名称（留空=不修改）'
+        required: false
+        default: ''
+      app_logo_url:
+        description: 'App Logo URL（PNG，建议 1024x1024，留空=不修改）'
+        required: false
+        default: ''
+      app_version:
+        description: '版本号（如 1.2.0，留空=不修改）'
+        required: false
+        default: ''
+
+      # ── 远程配置源（最多 4 个，主 + 3 个备用）──────────────
+      oss_url_1:
+        description: '主配置源 URL（config.json）'
+        required: false
+        default: ''
+      oss_url_2:
+        description: '备用配置源 2（可选）'
+        required: false
+        default: ''
+      oss_url_3:
+        description: '备用配置源 3（可选）'
+        required: false
+        default: ''
+      oss_url_4:
+        description: '备用配置源 4（可选）'
+        required: false
+        default: ''
+      panel_type:
+        description: 'panel_type（xboard / v2board）'
+        required: false
+        default: 'xboard'
+
+      # ── 加密密钥（与 App 源码 _xorKey 及 Bot 生成远程配置时使用相同的密钥）──
+      xor_key:
+        description: 'XOR 加密密钥（必须与 App 端 _xorKey 完全一致，≥16 字符）'
+        required: false
+        default: ''
+
+      # ── 客服 & 联系方式（写入远程配置，不烧录进包）─────────
+      telegram_channel:
+        description: 'TG 订阅频道（如 https://t.me/jichangbiji，写入远程配置）'
+        required: false
+        default: ''
+      crisp_id:
+        description: 'Crisp 客服 ID（留空=不启用）'
+        required: false
+        default: ''
+      salesmartly_token:
+        description: 'Salesmartly 客服 Token（留空=不启用，优先于 Crisp）'
+        required: false
+        default: ''
+
+      # ── 构建完成通知 ────────────────────────────────────────
+      notify_chat_id:
+        description: '构建完成后发包的 TG Chat ID（Bot Token 存 secret BUILD_BOT_TOKEN）'
+        required: false
+        default: ''
+
+env:
+  PRIVATE_REF: ${{ github.event_name == 'push' && github.ref_name || inputs.ref }}
+  IS_STABLE: ${{ github.event_name == 'push' && !contains(github.ref, '-') || github.event_name != 'push' && !contains(inputs.ref, '-') }}
+
+jobs:
+  # ── 预处理：根据 inputs.platforms 动态生成矩阵 ─────────────
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Set build matrix
+        id: set-matrix
+        run: |
+          python3 << 'EOF'
+          import json, os
+
+          all_items = [
+            {"platform": "android", "os": "ubuntu-latest"},
+            {"platform": "linux",   "os": "ubuntu-latest",  "arch": "amd64"},
+            {"platform": "macos",   "os": "macos-latest",   "arch": "arm64"},
+            {"platform": "macos",   "os": "macos-latest",   "arch": "amd64"},
+            {"platform": "windows", "os": "windows-latest", "arch": "amd64"},
+          ]
+
+          event_name   = os.environ.get("EVENT_NAME", "")
+          platforms_in = os.environ.get("PLATFORMS", "").strip()
+
+          if event_name == "push" or not platforms_in:
+            filtered = all_items
+          else:
+            selected = {p.strip() for p in platforms_in.split(",") if p.strip()}
+            filtered = [x for x in all_items if x["platform"] in selected]
+
+          matrix = json.dumps({"include": filtered})
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"matrix={matrix}\n")
+          EOF
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PLATFORMS:  ${{ inputs.platforms }}
+
+  build:
+    needs: setup
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+
+    steps:
+      # ── 0. 配置 git 凭据 ────────────────────────────────────
+      - name: Configure git credentials
+        run: |
+          git config --global credential.helper ""
+          git config --global url."https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "git@github.com:"
+          git config --global url."https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      # ── 1. 拉取私有源码 ─────────────────────────────────────
+      - name: Checkout private source
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO_NAME }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          submodules: recursive
+          ref: ${{ env.PRIVATE_REF }}
+
+      # ── 2. 注入构建参数（仅 workflow_dispatch 触发时执行）────
+      - name: Inject build parameters
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          PYTHONUTF8:     "1"
+          APP_NAME:       ${{ inputs.app_name }}
+          APP_LOGO_URL:   ${{ inputs.app_logo_url }}
+          APP_VERSION:    ${{ inputs.app_version }}
+          PANEL_TYPE:     ${{ inputs.panel_type || 'xboard' }}
+          OSS_URL_1:      ${{ inputs.oss_url_1 }}
+          OSS_URL_2:      ${{ inputs.oss_url_2 }}
+          OSS_URL_3:      ${{ inputs.oss_url_3 }}
+          OSS_URL_4:      ${{ inputs.oss_url_4 }}
+        run: |
+          python3 -m pip install Pillow pyyaml --quiet --break-system-packages 2>/dev/null || \
+          python3 -m pip install Pillow pyyaml --quiet --user 2>/dev/null || \
+          python3 -m pip install Pillow pyyaml --quiet
+          python3 -X utf8 << 'PYEOF'
+          import os, re, io, urllib.request
+          from pathlib import Path
+
+          def env(k, d=''):
+              return os.environ.get(k, d).strip()
+
+          # ── 1. 替换应用名称 ─────────────────────────────────
+          app_name = env('APP_NAME')
+          if app_name:
+              # Android strings.xml
+              p = Path('android/app/src/main/res/values/strings.xml')
+              if p.exists():
+                  p.write_text(re.sub(
+                      r'<string name="app_name">[^<]*</string>',
+                      f'<string name="app_name">{app_name}</string>',
+                      p.read_text()
+                  ))
+                  print(f'[inject] Android app_name → {app_name}')
+              # Windows CMakeLists.txt（控制 .exe 文件名，CMake 不支持中文/非 ASCII）
+              win_binary = re.sub(r'[\s/\\:*?"<>|]+', '_', app_name)
+              win_binary = re.sub(r'[^\x00-\x7F]+', '', win_binary)   # 去掉中文等非 ASCII
+              win_binary = re.sub(r'[^a-zA-Z0-9_-]+', '_', win_binary).strip('_') or 'Apex'
+              p = Path('windows/CMakeLists.txt')
+              if p.exists():
+                  p.write_text(re.sub(
+                      r'set\(BINARY_NAME\s+"[^"]*"\)',
+                      f'set(BINARY_NAME "{win_binary}")', p.read_text()
+                  ))
+                  print(f'[inject] Windows BINARY_NAME → {win_binary}')
+              # Windows packaging/exe/make_config.yaml（installer 配置，executable_name 必须与 BINARY_NAME 一致）
+              p = Path('windows/packaging/exe/make_config.yaml')
+              if p.exists():
+                  import yaml as _yaml2
+                  cfg = _yaml2.safe_load(p.read_text()) or {}
+                  cfg['app_name'] = app_name
+                  cfg['display_name'] = app_name
+                  cfg['install_dir_name'] = '{pf}\\' + app_name
+                  cfg['executable_name'] = f'{win_binary}.exe'
+                  cfg['output_base_file_name'] = win_binary
+                  p.write_text(_yaml2.dump(cfg, default_flow_style=False, allow_unicode=True))
+                  print(f'[inject] Windows make_config.yaml → display_name={app_name}, install_dir={app_name}')
+              # Windows Runner.rc（文件属性 ProductName / FileDescription）
+              p = Path('windows/runner/Runner.rc')
+              if p.exists():
+                  txt = p.read_text(encoding='utf-8', errors='replace')
+                  txt = re.sub(r'VALUE "ProductName",\s*"[^"]*"',    f'VALUE "ProductName", "{app_name}"',    txt)
+                  txt = re.sub(r'VALUE "FileDescription",\s*"[^"]*"', f'VALUE "FileDescription", "{app_name}"', txt)
+                  p.write_text(txt, encoding='utf-8')
+                  print(f'[inject] Windows ProductName → {app_name}')
+              # Windows main.cpp（Win32 窗口标题 → 任务栏显示名）
+              p = Path('windows/runner/main.cpp')
+              if p.exists():
+                  p.write_text(re.sub(
+                      r'window\.Create\(L"[^"]*"',
+                      f'window.Create(L"{win_binary}"', p.read_text()
+                  ))
+                  print(f'[inject] Windows window title → {win_binary}')
+              # macOS Info.plist
+              p = Path('macos/Runner/Info.plist')
+              if p.exists():
+                  p.write_text(re.sub(
+                      r'(<key>CFBundleName</key>\s*<string>)[^<]*(</string>)',
+                      rf'\g<1>{app_name}\g<2>', p.read_text()
+                  ))
+                  print(f'[inject] macOS CFBundleName → {app_name}')
+              # macOS AppInfo.xcconfig PRODUCT_NAME（决定 .app 文件名）
+              mac_binary = re.sub(r'[\s/\\:*?"<>|]+', '_', app_name)
+              mac_binary = re.sub(r'[^\x00-\x7F]+', '', mac_binary)
+              mac_binary = re.sub(r'[^a-zA-Z0-9_-]+', '_', mac_binary).strip('_') or 'Apex'
+              p = Path('macos/Runner/Configs/AppInfo.xcconfig')
+              if p.exists():
+                  p.write_text(re.sub(
+                      r'^PRODUCT_NAME\s*=\s*.*$',
+                      f'PRODUCT_NAME = {mac_binary}',
+                      p.read_text(), flags=re.MULTILINE
+                  ))
+                  print(f'[inject] macOS PRODUCT_NAME → {mac_binary}')
+              # macOS DMG make_config.yaml（appdmg 引用的 .app 路径）
+              p = Path('macos/packaging/dmg/make_config.yaml')
+              if p.exists():
+                  import yaml as _yaml_dmg
+                  dmg_cfg = _yaml_dmg.safe_load(p.read_text()) or {}
+                  dmg_cfg['title'] = app_name
+                  for item in dmg_cfg.get('contents', []):
+                      if item.get('type') == 'file' and str(item.get('path', '')).endswith('.app'):
+                          item['path'] = f'{mac_binary}.app'
+                  p.write_text(_yaml_dmg.dump(dmg_cfg, default_flow_style=False, allow_unicode=True))
+                  print(f'[inject] macOS DMG config → title={app_name}, app={mac_binary}.app')
+              # Linux CMakeLists.txt（CMake 不支持空格/特殊字符作为 target 名，与 Windows 处理一致）
+              linux_binary = re.sub(r'[\s/\\:*?"<>|]+', '_', app_name)
+              linux_binary = re.sub(r'[^\x00-\x7F]+', '', linux_binary)   # 去掉中文等非 ASCII
+              linux_binary = re.sub(r'[^a-zA-Z0-9_-]+', '_', linux_binary).strip('_') or 'apex'
+              p = Path('linux/CMakeLists.txt')
+              if p.exists():
+                  p.write_text(re.sub(
+                      r'set\(BINARY_NAME\s+"[^"]*"\)',
+                      f'set(BINARY_NAME "{linux_binary}")', p.read_text()
+                  ))
+                  print(f'[inject] Linux BINARY_NAME → {linux_binary}')
+              # distribute_options.yaml（控制输出文件名）
+              # Windows: flutter_distributor 会把 app_name 写回 CMakeLists.txt 的 BINARY_NAME
+              # CMake 不支持中文 target 名，所以 Windows 下必须用 ASCII 的 win_binary
+              import sys as _sys
+              p = Path('distribute_options.yaml')
+              if p.exists():
+                  import yaml as _yaml
+                  opts = _yaml.safe_load(p.read_text()) or {}
+                  # Windows 和 Linux 的 CMake 都不支持空格 target 名，统一用 sanitized 名
+                  if _sys.platform == 'win32':
+                      dist_app_name = win_binary
+                  elif _sys.platform.startswith('linux'):
+                      dist_app_name = linux_binary
+                  else:
+                      dist_app_name = app_name
+                  opts['app_name'] = dist_app_name
+                  p.write_text(_yaml.dump(opts, default_flow_style=False, allow_unicode=True))
+                  print(f'[inject] distribute_options.yaml app_name → {dist_app_name}')
+              # lib/common/constant.dart（应用内名称、窗口标题）
+              p = Path('lib/common/constant.dart')
+              if p.exists():
+                  txt = p.read_text(encoding='utf-8')
+                  txt = re.sub(r'(const appName\s*=\s*")[^"]*(")', rf'\g<1>{app_name}\g<2>', txt)
+                  txt = re.sub(r'(const appNameEn\s*=\s*")[^"]*(")', rf'\g<1>{app_name}\g<2>', txt)
+                  p.write_text(txt, encoding='utf-8')
+                  print(f'[inject] constant.dart appName → {app_name}')
+
+          # ── 3. 替换版本号 ───────────────────────────────────
+          ver = env('APP_VERSION')
+          if ver:
+              p = Path('pubspec.yaml')
+              txt = p.read_text()
+              # 替换 major.minor.patch（兼容有/无 +buildNumber）
+              txt = re.sub(r'^(version:\s*)[\d.]+(\+\S*)?', rf'\g<1>{ver}',
+                           txt, flags=re.MULTILINE)
+              p.write_text(txt)
+              print(f'[inject] pubspec version → {ver}')
+
+          # ── 4. 注入 panel_type 到 assets/config/config.yaml ──
+          # 注意：OSS URL 不写入 config.yaml（安装目录明文可见），
+          # 仅通过 dart-define 编译注入（二进制内嵌，不可直接读取）
+          panel_type = env('PANEL_TYPE') or 'xboard'
+          p = Path('assets/config/config.yaml')
+          if p.exists():
+              txt = p.read_text(encoding='utf-8')
+              txt = re.sub(r'^panel_type:\s*\S+', f'panel_type: {panel_type}', txt, flags=re.MULTILINE)
+              p.write_text(txt, encoding='utf-8')
+              print(f'[inject] config.yaml panel_type → {panel_type}')
+
+          # ── 5. 替换应用图标 ─────────────────────────────────
+          # 无论是否换图标，始终删除 adaptive icon XML，避免系统 mask 裁切导致图标显示异常
+          import glob as _glob
+          for xml_f in _glob.glob('android/app/src/main/res/mipmap-anydpi*/ic_launcher*.xml'):
+              Path(xml_f).unlink()
+              print(f'[inject] 删除 adaptive XML: {xml_f}')
+
+          logo_url = env('APP_LOGO_URL')
+          if logo_url:
+              try:
+                  import json as _json
+                  from PIL import Image
+
+                  # 下载图片（带 User-Agent，支持重定向）
+                  req = urllib.request.Request(logo_url, headers={'User-Agent': 'Mozilla/5.0'})
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      img = Image.open(io.BytesIO(r.read())).convert('RGBA')
+                  print(f'[inject] Logo 下载成功: {img.size}')
+
+                  # ── 圆角处理工具函数 ─────────────────────────
+                  def _round_corners(src, radius_pct=0.18):
+                      """给图片加圆角，radius_pct 为圆角半径占边长的比例"""
+                      from PIL import ImageDraw
+                      size = src.size[0]
+                      r = int(size * radius_pct)
+                      # 创建圆角蒙版（抗锯齿：4x 超采样）
+                      scale = 4
+                      mask = Image.new('L', (size * scale, size * scale), 0)
+                      draw = ImageDraw.Draw(mask)
+                      draw.rounded_rectangle(
+                          [(0, 0), (size * scale - 1, size * scale - 1)],
+                          radius=r * scale, fill=255
+                      )
+                      mask = mask.resize((size, size), Image.LANCZOS)
+                      result = src.convert('RGBA')
+                      result.putalpha(mask)
+                      return result
+
+                  # ── Android mipmap ──────────────────────────
+                  # 如果图标有透明背景（RGBA），合成到白色底图，避免 Android 显示纯黑
+                  def _android_icon(src, size):
+                      ri = src.resize((size, size), Image.LANCZOS)
+                      ri = _round_corners(ri)
+                      if ri.mode == 'RGBA':
+                          bg = Image.new('RGBA', ri.size, (255, 255, 255, 255))
+                          bg.paste(ri, mask=ri.split()[3])
+                          return bg.convert('RGB')
+                      return ri
+
+                  # mipmap-anydpi-v26 也需要替换：Android 8+ 优先使用 anydpi 目录
+                  # 若源码中该目录存有 WEBP 文件（非 XML），不替换会导致用户上传的图标不生效
+                  for folder, size in {
+                      'mipmap-mdpi': 48, 'mipmap-hdpi': 72,
+                      'mipmap-xhdpi': 96, 'mipmap-xxhdpi': 144,
+                      'mipmap-xxxhdpi': 192,
+                      'mipmap-anydpi-v26': 192,  # Android 8+ 优先此目录
+                  }.items():
+                      base = Path(f'android/app/src/main/res/{folder}')
+                      if not base.exists():
+                          continue
+                      ri = _android_icon(img, size)
+                      replaced = False
+                      for stem in ['ic_launcher', 'ic_launcher_round']:
+                          for ext, fmt in [('webp', 'WEBP'), ('png', 'PNG')]:
+                              f = base / f'{stem}.{ext}'
+                              if f.exists():
+                                  ri.save(f, format=fmt)
+                                  print(f'[inject] Android icon: {f}')
+                                  replaced = True
+                      if not replaced:
+                          ri.save(base / 'ic_launcher.webp', format='WEBP')
+                          print(f'[inject] Android icon (新建): {base}/ic_launcher.webp')
+
+                  # Android Google Play 封面图
+                  ps = Path('android/app/src/main/ic_launcher-playstore.png')
+                  if ps.exists():
+                      img.resize((512, 512), Image.LANCZOS).save(ps)
+                      print(f'[inject] Android playstore icon: {ps}')
+
+                  # ── Windows ICO ─────────────────────────────
+                  # 每个尺寸单独加圆角后合并为多尺寸 ICO
+                  ico = Path('windows/runner/resources/app_icon.ico')
+                  if ico.parent.exists():
+                      ico_sizes = [16, 32, 48, 64, 128, 256]
+                      ico_images = []
+                      for s in ico_sizes:
+                          ri = img.resize((s, s), Image.LANCZOS)
+                          ri = _round_corners(ri)
+                          ico_images.append(ri)
+                      ico_images[0].save(
+                          str(ico), format='ICO',
+                          append_images=ico_images[1:],
+                          sizes=[(s, s) for s in ico_sizes]
+                      )
+                      print(f'[inject] Windows ICO (6 尺寸, 圆角): {ico}')
+
+                  # ── macOS appiconset ────────────────────────
+                  # 用 Contents.json 里的 size/scale 字段计算像素尺寸，不依赖文件名格式
+                  appiconset = Path('macos/Runner/Assets.xcassets/AppIcon.appiconset')
+                  if appiconset.exists():
+                      contents_file = appiconset / 'Contents.json'
+                      if contents_file.exists():
+                          data = _json.loads(contents_file.read_text())
+                          processed = set()
+                          for item in data.get('images', []):
+                              fname = item.get('filename', '')
+                              if not fname or fname in processed:
+                                  continue
+                              processed.add(fname)
+                              size_str  = item.get('size', '')    # e.g. "16x16"
+                              scale_str = item.get('scale', '1x') # e.g. "2x"
+                              try:
+                                  base_px = int(size_str.split('x')[0])
+                                  scale   = int(scale_str.rstrip('x'))
+                                  px = base_px * scale
+                                  img.resize((px, px), Image.LANCZOS).save(appiconset / fname)
+                                  print(f'[inject] macOS icon: {fname} ({px}x{px})')
+                              except Exception as ex:
+                                  print(f'[inject] ⚠️  macOS icon {fname} 跳过: {ex}')
+                      print(f'[inject] macOS 图标替换完成')
+
+                  # ── assets/images/ ──────────────────────────
+                  assets_img = Path('assets/images')
+                  if assets_img.exists():
+                      img_1024 = _round_corners(img.resize((1024, 1024), Image.LANCZOS))
+                      for name in ['icon.png', 'icon_black.png', 'icon_white.png']:
+                          p = assets_img / name
+                          if p.exists():
+                              img_1024.save(p)
+                              print(f'[inject] assets/images: {p}')
+                      for name in ['icon.ico', 'icon_black.ico', 'icon_white.ico']:
+                          p = assets_img / name
+                          if p.exists():
+                              ico_imgs = [_round_corners(img.resize((s, s), Image.LANCZOS)) for s in [16,32,48,64,128,256]]
+                              ico_imgs[0].save(str(p), format='ICO', append_images=ico_imgs[1:],
+                                               sizes=[(s,s) for s in [16,32,48,64,128,256]])
+                              print(f'[inject] assets/images ICO (圆角): {p}')
+
+                  print(f'[inject] ✅ 图标替换全部完成')
+              except Exception as e:
+                  import traceback
+                  print(f'[inject] ⚠️  图标替换失败（跳过）: {e}')
+                  traceback.print_exc()
+
+          PYEOF
+
+      # ── 3. Android 签名配置（可选）──────────────────────────
+      - name: Setup Android signing
+        if: matrix.platform == 'android'
+        env:
+          KEYSTORE:       ${{ secrets.KEYSTORE }}
+          KEY_ALIAS:      ${{ secrets.KEY_ALIAS }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD:   ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE" ]; then
+            echo "$KEYSTORE" | base64 --decode > android/app/keystore.jks
+            echo "keyAlias=$KEY_ALIAS"           >> android/local.properties
+            echo "storePassword=$STORE_PASSWORD" >> android/local.properties
+            echo "keyPassword=$KEY_PASSWORD"     >> android/local.properties
+          fi
+
+      # ── 4. Windows 构建依赖 ──────────────────────────────────
+      - name: Setup Windows build environment
+        if: matrix.platform == 'windows'
+        run: |
+          if ! command -v jq &>/dev/null; then
+            choco install jq -y --no-progress && \
+              echo "/c/ProgramData/chocolatey/bin" >> $GITHUB_PATH || true
+          fi
+          if ! command -v cargo &>/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            source "$HOME/.cargo/env"
+            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          fi
+          cargo --version
+          ATL_GLOB="/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/*/atlmfc/include/atlstr.h"
+          if ! ls $ATL_GLOB 1>/dev/null 2>&1; then
+            choco install visualstudio2022buildtools \
+              --package-parameters "--add Microsoft.VisualStudio.Workload.VCTools \
+                --add Microsoft.VisualStudio.Component.VC.ATL \
+                --add Microsoft.VisualStudio.Component.VC.ATLMFC \
+                --includeRecommended --quiet" \
+              -y --force || true
+          fi
+          INNO_EXE="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          if [ ! -f "$INNO_EXE" ]; then
+            choco install innosetup -y --no-progress
+          fi
+          echo "/c/Program Files (x86)/Inno Setup 6" >> $GITHUB_PATH
+
+      # ── 5. macOS：清除 SPM 构建缓存 ─────────────────────────
+      - name: Clean macOS SPM cache
+        if: matrix.platform == 'macos'
+        run: |
+          rm -rf macos/Runner.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+          rm -rf macos/Runner.xcworkspace/xcshareddata/swiftpm/
+
+      # ── 6. 安装 Go ───────────────────────────────────────────
+      - name: Setup Go
+        if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: false
+
+      # ── 7. 安装 Flutter ──────────────────────────────────────
+      - name: Setup Flutter
+        if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      # ── 8. Windows: 安装 flutter_distributor ─────────────────
+      - name: Setup flutter_distributor (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          PUB_BIN="/c/Users/$(whoami)/AppData/Local/Pub/Cache/bin"
+          echo "$PUB_BIN" >> $GITHUB_PATH
+          dart pub global activate flutter_distributor
+
+      # ── 9. 安装项目依赖 ──────────────────────────────────────
+      - name: Install dependencies
+        if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
+        run: flutter pub get
+
+      # ── 10. 生成 SDK 代码 ─────────────────────────────────────
+      - name: Generate SDK code
+        if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
+        run: |
+          cd lib/sdk/flutter_xboard_sdk
+          flutter pub get
+          dart run build_runner build --delete-conflicting-outputs
+          cd ../../..
+
+      # ── 11. 生成主项目代码 ────────────────────────────────────
+      - name: Generate project code
+        if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      # ── 12. 编译构建 ──────────────────────────────────────────
+      - name: Build
+        # matrix 上下文仅在 step 级可用，job 级 if 不支持（422 错误）
+        if: |
+          github.event_name == 'push' ||
+          inputs.platforms == '' ||
+          contains(inputs.platforms, matrix.platform)
+        env:
+          XOR_KEY:    ${{ inputs.xor_key }}
+          OSS_URL_1:  ${{ inputs.oss_url_1 }}
+          OSS_URL_2:  ${{ inputs.oss_url_2 }}
+          OSS_URL_3:  ${{ inputs.oss_url_3 }}
+          OSS_URL_4:  ${{ inputs.oss_url_4 }}
+          PANEL_TYPE: ${{ inputs.panel_type || 'xboard' }}
+        run: |
+          dart setup.dart ${{ matrix.platform }} \
+            ${{ matrix.arch && format('--arch {0}', matrix.arch) || '' }} \
+            ${{ env.IS_STABLE == 'true' && '--env stable' || '' }}
+
+      # ── 12b. 重命名 Windows 输出文件（ASCII 名 → 完整 App 名）──
+      - name: Rename Windows dist files
+        if: matrix.platform == 'windows' && github.event_name == 'workflow_dispatch' && inputs.app_name != ''
+        env:
+          APP_NAME: ${{ inputs.app_name }}
+        run: |
+          python3 -X utf8 << 'PYEOF'
+          import os, re
+          from pathlib import Path
+
+          app_name = os.environ.get('APP_NAME', '').strip()
+          if not app_name:
+              print('[rename] APP_NAME not set, skipping')
+              exit(0)
+
+          # 与 inject 步骤相同的 sanitize 逻辑，得到 CMake 用的 ASCII 名
+          win_binary = re.sub(r'[\s/\\:*?"<>|]+', '_', app_name)
+          win_binary = re.sub(r'[^\x00-\x7F]+', '', win_binary)
+          win_binary = re.sub(r'[^a-zA-Z0-9_-]+', '_', win_binary).strip('_') or 'Apex'
+
+          if win_binary == app_name:
+              print(f'[rename] binary name == app_name ("{app_name}")，无需重命名')
+              exit(0)
+
+          dist = Path('dist')
+          if not dist.exists():
+              print('[rename] dist/ 不存在，跳过')
+              exit(0)
+
+          renamed = 0
+          for f in sorted(dist.rglob('*')):
+              if f.is_file() and win_binary in f.name:
+                  new_name = f.name.replace(win_binary, app_name, 1)
+                  new_path = f.parent / new_name
+                  f.rename(new_path)
+                  print(f'[rename] {f.name} → {new_name}')
+                  renamed += 1
+
+          print(f'[rename] 共重命名 {renamed} 个文件（binary="{win_binary}", app="{app_name}"）')
+          PYEOF
+
+      # ── 12c. Windows: 下载 VC++ 运行库 ──────────────────────────
+      - name: Download VC++ Redistributable
+        if: matrix.platform == 'windows'
+        run: |
+          curl -fsSL -o vc_redist.x64.exe "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+          echo "[vc_redist] $(du -sh vc_redist.x64.exe | cut -f1)"
+
+      # ── 12d. Windows: Inno Setup 打包 ────────────────────────
+      - name: Build Windows installer (Inno Setup)
+        if: matrix.platform == 'windows'
+        run: |
+          APP_NAME="${{ inputs.app_name }}"
+          APP_NAME="${APP_NAME:-Apex}"
+
+          APP_VERSION="${{ inputs.app_version }}"
+          if [ -z "$APP_VERSION" ]; then
+            APP_VERSION=$(grep "^version:" pubspec.yaml | sed 's/version: //' | sed 's/+.*//')
+          fi
+
+          # 从 CMakeLists.txt 读取实际 exe 名（inject 步骤可能已修改）
+          # 注意：不能用 grep -oP（Perl正则），Windows CI 的 Git Bash 不支持，
+          # 会静默失败导致回退到 FlClash → 快捷方式指向错误的 exe
+          BINARY_EXE=$(sed -n 's/.*set(BINARY_NAME[[:space:]]*"\([^"]*\)").*/\1/p' windows/CMakeLists.txt 2>/dev/null)
+          BINARY_EXE="${BINARY_EXE:-Apex}"
+
+          # 从 app_name SHA256 前 32 位生成稳定 GUID（同名每次固定）
+          HASH=$(echo -n "$APP_NAME" | sha256sum | cut -c1-32 | tr '[:lower:]' '[:upper:]')
+          APP_UUID="${HASH:0:8}-${HASH:8:4}-${HASH:12:4}-${HASH:16:4}-${HASH:20:12}"
+
+          echo "Inno: AppName=$APP_NAME  BinaryExe=$BINARY_EXE  AppVersion=$APP_VERSION  AppId=$APP_UUID"
+
+          if [ -f "update_installer.iss" ]; then
+            mkdir -p dist
+            # MSYS_NO_PATHCONV=1 防止 Git Bash 把 /DKey=Val 当成 Windows 路径转换
+            # （/D 会被误判为驱动器盘符 D:\，导致 ISCC 收到多个"文件名"参数报错）
+            MSYS_NO_PATHCONV=1 ISCC.exe \
+              "/DMyAppName=$APP_NAME" \
+              "/DMyBinaryName=$BINARY_EXE" \
+              "/DMyAppVersion=$APP_VERSION" \
+              "/DMyAppId=$APP_UUID" \
+              update_installer.iss
+          else
+            echo "[installer] update_installer.iss not found, skipping"
+          fi
+
+      # ── 13. 构建结果诊断 ──────────────────────────────────────
+      - name: Debug dist output
+        if: always()
+        run: |
+          echo "=== dist/ contents ==="
+          ls -la dist/ 2>/dev/null || echo "[dist/ not found]"
+
+      # ── 14. 上传构建产物 ──────────────────────────────────────
+      - name: Upload artifact
+        if: |
+          github.event_name == 'push' ||
+          inputs.platforms == '' ||
+          contains(inputs.platforms, matrix.platform)
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-${{ matrix.platform }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}
+          path: ./dist
+          overwrite: true
+
+      # ── 15. 构建完成：通过 TG 发包 ─────────────────────────
+      # 仅 workflow_dispatch 且配置了 notify_chat_id 时触发
+      # 使用 Python：全平台统一 UTF-8，Android 多 APK 合并为一条消息
+      - name: Notify and send artifacts to Telegram
+        if: |
+          always() &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.notify_chat_id != '' &&
+          (inputs.platforms == '' || contains(inputs.platforms, matrix.platform))
+        env:
+          BOT_TOKEN:  ${{ secrets.BUILD_BOT_TOKEN }}
+          CHAT_ID:    ${{ inputs.notify_chat_id }}
+          PLATFORM:   ${{ matrix.platform }}
+          ARCH:       ${{ matrix.arch }}
+          RUN_URL:    ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+          PYTHONUTF8: "1"
+        run: |
+          python3 -X utf8 - << 'PYEOF'
+          import os, sys, json, urllib.request
+          from pathlib import Path
+
+          bot_token = os.environ.get("BOT_TOKEN", "").strip()
+          if not bot_token:
+              print("[notify] BUILD_BOT_TOKEN not configured, skip")
+              sys.exit(0)
+
+          chat_id    = os.environ.get("CHAT_ID", "").strip()
+          platform   = os.environ.get("PLATFORM", "").strip()
+          arch       = os.environ.get("ARCH", "").strip()
+          run_url    = os.environ.get("RUN_URL", "").strip()
+          job_status = os.environ.get("JOB_STATUS", "").strip()
+          API        = f"https://api.telegram.org/bot{bot_token}"
+
+          LABELS = {
+              "android-":      "Android",
+              "windows-amd64": "Windows (x64)",
+              "macos-arm64":   "macOS (Apple Silicon)",
+              "macos-amd64":   "macOS (Intel)",
+              "linux-amd64":   "Linux (x64)",
+          }
+          label = LABELS.get(f"{platform}-{arch}", f"{platform}{'-'+arch if arch else ''}")
+
+          def send_json(endpoint, data):
+              req = urllib.request.Request(
+                  f"{API}/{endpoint}",
+                  data=json.dumps(data).encode("utf-8"),
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return json.loads(r.read())
+              except Exception as e:
+                  print(f"[notify] {endpoint} error: {e}")
+                  return {}
+
+          def make_multipart(fields, files):
+              boundary = "TGboundary7749"
+              body = b""
+              for k, v in fields.items():
+                  body += (
+                      f"--{boundary}\r\n"
+                      f'Content-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'
+                  ).encode("utf-8")
+              for name, fname, data in files:
+                  body += (
+                      f"--{boundary}\r\n"
+                      f'Content-Disposition: form-data; name="{name}"; filename="{fname}"\r\n'
+                      f"Content-Type: application/octet-stream\r\n\r\n"
+                  ).encode("utf-8")
+                  body += data
+                  body += b"\r\n"
+              body += f"--{boundary}--\r\n".encode("utf-8")
+              return boundary, body
+
+          def send_document(fp):
+              boundary, body = make_multipart(
+                  {"chat_id": chat_id},
+                  [("document", fp.name, fp.read_bytes())],
+              )
+              req = urllib.request.Request(
+                  f"{API}/sendDocument", data=body,
+                  headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=120):
+                      print(f"[notify] sent {fp.name}")
+              except Exception as e:
+                  print(f"[notify] failed {fp.name}: {e}")
+
+          def send_media_group(fps):
+              media = [{"type": "document", "media": f"attach://file{i}"} for i in range(len(fps))]
+              files = [(f"file{i}", fp.name, fp.read_bytes()) for i, fp in enumerate(fps)]
+              boundary, body = make_multipart(
+                  {"chat_id": chat_id, "media": json.dumps(media)},
+                  files,
+              )
+              req = urllib.request.Request(
+                  f"{API}/sendMediaGroup", data=body,
+                  headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=180):
+                      print(f"[notify] sent media group ({len(fps)} files)")
+              except Exception as e:
+                  print(f"[notify] media group failed: {e}, falling back")
+                  for fp in fps:
+                      send_document(fp)
+
+          if job_status == "success":
+              msg = f"\u2705 *{label}* \u6784\u5efa\u5b8c\u6210"
+          else:
+              msg = f"\u274c *{label}* \u6784\u5efa\u5931\u8d25 \u2014 [\u67e5\u770b\u65e5\u5fd7]({run_url})"
+
+          send_json("sendMessage", {
+              "chat_id": chat_id,
+              "text": msg,
+              "parse_mode": "Markdown",
+              "disable_web_page_preview": True,
+          })
+
+          if job_status == "success":
+              dist = Path("dist")
+              all_files = sorted(
+                  f for f in dist.rglob("*")
+                  if f.is_file() and not f.name.endswith(".sha256")
+              ) if dist.exists() else []
+              small = [f for f in all_files if f.stat().st_size <= 52428800]
+              large = [f for f in all_files if f.stat().st_size > 52428800]
+              if len(small) > 1:
+                  send_media_group(small)
+              elif len(small) == 1:
+                  send_document(small[0])
+              for f in large:
+                  size_mb = f.stat().st_size // 1024 // 1024
+                  send_json("sendMessage", {
+                      "chat_id": chat_id,
+                      "text": f"\U0001f4e6 `{f.name}` ({size_mb}MB) \u8d85\u51fa TG \u9650\u5236\uff0c\u8bf7\u5230 [Actions]({run_url}) \u4e0b\u8f7d",
+                      "parse_mode": "Markdown",
+                      "disable_web_page_preview": True,
+                  })
+          PYEOF
+
+  # ── Release：打 tag 时自动发布到本公共仓库 ──────────────────
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./dist/
+          pattern: artifact-*
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd ./dist
+          for file in $(find . -type f -not -name "*.sha256"); do
+            sha256sum "$file" > "${file}.sha256"
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./dist/*
+          generate_release_notes: true
