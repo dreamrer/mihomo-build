@@ -494,20 +494,64 @@ jobs:
                       print(f'[inject] Android playstore icon: {ps}')
 
                   # ── Windows ICO ─────────────────────────────
+                  # rc.exe 对小尺寸 PNG 格式支持有缺陷，必须用 BMP 格式
+                  # 仅 256x256 使用 PNG 压缩（ICO 规范推荐）
+                  def _build_ico(src_img, out_path, sizes):
+                      """生成 rc.exe 兼容的 ICO：小尺寸用 BMP，256 用 PNG"""
+                      import struct as _st
+                      entries = []
+                      for s in sizes:
+                          ri = src_img.resize((s, s), Image.LANCZOS).convert('RGBA')
+                          if s >= 256:
+                              buf = io.BytesIO()
+                              ri.save(buf, format='PNG')
+                              entries.append((s, buf.getvalue()))
+                          else:
+                              # BMP DIB: BITMAPINFOHEADER + pixel data (bottom-up BGRA) + AND mask
+                              w, h = ri.size
+                              pixels = ri.load()
+                              # BITMAPINFOHEADER (40 bytes)
+                              bih = _st.pack('<IiiHHIIiiII',
+                                  40,        # biSize
+                                  w,         # biWidth
+                                  h * 2,     # biHeight (doubled: XOR + AND)
+                                  1,         # biPlanes
+                                  32,        # biBitCount
+                                  0,         # biCompression (BI_RGB)
+                                  0,         # biSizeImage (can be 0 for BI_RGB)
+                                  0, 0,      # biXPelsPerMeter, biYPelsPerMeter
+                                  0, 0,      # biClrUsed, biClrImportant
+                              )
+                              # XOR bitmap (bottom-up, BGRA)
+                              xor_data = bytearray()
+                              for y in range(h - 1, -1, -1):
+                                  for x in range(w):
+                                      r, g, b, a = pixels[x, y]
+                                      xor_data += bytes([b, g, r, a])
+                              # AND mask (1bpp, bottom-up, rows padded to 4 bytes)
+                              and_row_bytes = ((w + 31) // 32) * 4
+                              and_data = bytes(and_row_bytes * h)
+                              entries.append((s, bih + bytes(xor_data) + and_data))
+                      # Write ICO file
+                      count = len(entries)
+                      header = _st.pack('<HHH', 0, 1, count)
+                      data_offset = 6 + count * 16
+                      directory = b''
+                      image_data = b''
+                      for s, raw in entries:
+                          w_byte = 0 if s >= 256 else s
+                          h_byte = 0 if s >= 256 else s
+                          directory += _st.pack('<BBBBHHII',
+                              w_byte, h_byte, 0, 0, 1, 32, len(raw), data_offset)
+                          data_offset += len(raw)
+                          image_data += raw
+                      Path(out_path).write_bytes(header + directory + image_data)
+
                   ico = Path('windows/runner/resources/app_icon.ico')
                   if ico.parent.exists():
-                      # 覆盖常见 DPI 缩放：100%=32/16, 125%=40/20, 150%=48/24, 200%=64/32
                       ico_sizes = [16, 20, 24, 32, 40, 48, 64, 128, 256]
-                      ico_images = []
-                      for s in ico_sizes:
-                          ri = img.resize((s, s), Image.LANCZOS)
-                          ico_images.append(ri)
-                      ico_images[0].save(
-                          str(ico), format='ICO',
-                          append_images=ico_images[1:],
-                          sizes=[(s, s) for s in ico_sizes]
-                      )
-                      print(f'[inject] Windows ICO ({len(ico_sizes)} 尺寸): {ico}')
+                      _build_ico(img, str(ico), ico_sizes)
+                      print(f'[inject] Windows ICO ({len(ico_sizes)} 尺寸, BMP+PNG): {ico}')
 
                   # ── macOS appiconset ────────────────────────
                   # 用 Contents.json 里的 size/scale 字段计算像素尺寸，不依赖文件名格式
@@ -547,9 +591,7 @@ jobs:
                       for name in ['icon.ico', 'icon_black.ico', 'icon_white.ico']:
                           p = assets_img / name
                           if p.exists():
-                              ico_imgs = [img.resize((s, s), Image.LANCZOS) for s in _tray_ico_sizes]
-                              ico_imgs[0].save(str(p), format='ICO', append_images=ico_imgs[1:],
-                                               sizes=[(s,s) for s in _tray_ico_sizes])
+                              _build_ico(img, str(p), _tray_ico_sizes)
                               print(f'[inject] assets/images ICO: {p}')
 
                   print(f'[inject] ✅ 图标替换全部完成')
