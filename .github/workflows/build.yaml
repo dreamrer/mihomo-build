@@ -647,7 +647,20 @@ jobs:
           fi
           echo "/c/Program Files (x86)/Inno Setup 6" >> $GITHUB_PATH
 
-      # ── 5. macOS：清除 SPM 构建缓存 ─────────────────────────
+      # ── 5. macOS：没有自定义 logo 时，从默认源图标生成全套 appiconset ──
+      # 有 logo 时 inject 步骤已用 PIL 替换，这里只处理无 logo 的情况
+      - name: Generate macOS icons from default source (no logo)
+        if: matrix.platform == 'macos' && (github.event_name != 'workflow_dispatch' || inputs.app_logo_url == '')
+        run: |
+          SRC="assets/images/icon.png"
+          ICONSET="macos/Runner/Assets.xcassets/AppIcon.appiconset"
+          for SIZE in 16 32 64 128 256 512 1024; do
+            sips -z $SIZE $SIZE "$SRC" --out "$ICONSET/app_icon_${SIZE}.png" --resampleFilter lanczos > /dev/null
+          done
+          echo "macOS icons regenerated from $SRC"
+          ls -lh "$ICONSET"/*.png
+
+      # ── 5b. macOS：清除 SPM 构建缓存 ────────────────────────
       - name: Clean macOS SPM cache
         if: matrix.platform == 'macos'
         run: |
