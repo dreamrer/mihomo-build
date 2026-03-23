@@ -44,10 +44,6 @@ on:
         description: '版本号（如 1.2.0，留空=不修改）'
         required: false
         default: ''
-      custom_ua:
-        description: '自定义 User-Agent（留空=默认 Apex）'
-        required: false
-        default: ''
 
       # ── 远程配置源（最多 4 个，主 + 3 个备用）──────────────
       oss_url_1:
@@ -186,7 +182,6 @@ jobs:
           OSS_URL_2:      ${{ inputs.oss_url_2 }}
           OSS_URL_3:      ${{ inputs.oss_url_3 }}
           OSS_URL_4:      ${{ inputs.oss_url_4 }}
-          CUSTOM_UA:      ${{ inputs.custom_ua }}
         run: |
           python3 -m pip install Pillow pyyaml --quiet --break-system-packages 2>/dev/null || \
           python3 -m pip install Pillow pyyaml --quiet --user 2>/dev/null || \
@@ -446,20 +441,6 @@ jobs:
                   txt = re.sub(r'^(panel_type:\s*\S+)', rf'\1\napi_prefix: {api_prefix}', txt, flags=re.MULTILINE)
               p.write_text(txt, encoding='utf-8')
               print(f'[inject] config.yaml api_prefix → {api_prefix}')
-
-          # ── 4c. 注入自定义 UA 到 lib/common/package.dart ──
-          custom_ua = env('CUSTOM_UA')
-          if custom_ua:
-              p = Path('lib/common/package.dart')
-              if p.exists():
-                  txt = p.read_text(encoding='utf-8')
-                  txt = re.sub(
-                      r'''(String get ua => )(['"])[^'"]*\2''',
-                      rf"\1'{custom_ua}'",
-                      txt,
-                  )
-                  p.write_text(txt, encoding='utf-8')
-                  print(f'[inject] package.dart UA → {custom_ua}')
 
           # ── 5. 替换应用图标 ─────────────────────────────────
           # 仅在用户上传了自定义 Logo 时才处理 adaptive icon
