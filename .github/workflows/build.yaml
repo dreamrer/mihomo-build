@@ -71,6 +71,12 @@ on:
         required: false
         default: '/api/v1'
 
+      # ── 默认 UA ────────────────────────────────────────────
+      default_ua:
+        description: '默认 User-Agent（留空=Apex/v版本号，后端通过 flag 参数协商格式，UA 仅用于标识）'
+        required: false
+        default: ''
+
       # ── 加密密钥（与 App 源码 _xorKey 及 Bot 生成远程配置时使用相同的密钥）──
       xor_key:
         description: 'XOR 加密密钥（必须与 App 端 _xorKey 完全一致，≥16 字符）'
@@ -182,6 +188,7 @@ jobs:
           OSS_URL_2:      ${{ inputs.oss_url_2 }}
           OSS_URL_3:      ${{ inputs.oss_url_3 }}
           OSS_URL_4:      ${{ inputs.oss_url_4 }}
+          DEFAULT_UA:     ${{ inputs.default_ua }}
         run: |
           python3 -m pip install Pillow pyyaml --quiet --break-system-packages 2>/dev/null || \
           python3 -m pip install Pillow pyyaml --quiet --user 2>/dev/null || \
@@ -407,6 +414,20 @@ jobs:
                                    f'"version": "{release_ver}"', cfg_txt)
                   cfg_file.write_text(cfg_txt, encoding='utf-8')
                   print(f'[inject] release_config version → {release_ver}')
+
+          # ── 3b. 替换默认 UA ────────────────────────────────
+          default_ua = env('DEFAULT_UA')
+          if default_ua:
+              p = Path('lib/common/package.dart')
+              if p.exists():
+                  txt = p.read_text(encoding='utf-8')
+                  txt = re.sub(
+                      r'''String get ua => ["'][^"']*["']''',
+                      f'String get ua => "{default_ua}"',
+                      txt
+                  )
+                  p.write_text(txt, encoding='utf-8')
+                  print(f'[inject] default UA → {default_ua}')
 
           # ── 4. 注入 panel_type 到 assets/config/config.yaml ──
           # 注意：OSS URL 不写入 config.yaml（安装目录明文可见），
