@@ -831,7 +831,7 @@ jobs:
       - name: Download VC++ Redistributable and copy DLLs
         if: matrix.platform == 'windows'
         run: |
-          curl -fsSL -o vc_redist.x64.exe "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+          curl -fsSL --retry 3 --retry-delay 5 -o vc_redist.x64.exe "https://aka.ms/vs/17/release/vc_redist.x64.exe"
           echo "[vc_redist] $(du -sh vc_redist.x64.exe | cut -f1)"
 
           # 从系统目录复制 VC++ DLL 到 Release 目录（便携版 zip 会包含）
