@@ -643,6 +643,26 @@ jobs:
                               _build_ico(img, str(p), _tray_ico_sizes)
                               print(f'[inject] assets/images ICO: {p}')
 
+                      # ── macOS tray template icon ──────────────
+                      # macOS 菜单栏 template image 需要纯黑+透明，44x44
+                      # 将 logo 缩放到 44x44，提取 alpha 通道作为黑色蒙版
+                      tray_p = assets_img / 'tray_icon.png'
+                      try:
+                          tray_size = 44
+                          tray_src = img.resize((tray_size, tray_size), Image.LANCZOS).convert('RGBA')
+                          tray_img = Image.new('RGBA', (tray_size, tray_size), (0, 0, 0, 0))
+                          pixels = tray_src.load()
+                          tray_pixels = tray_img.load()
+                          for y in range(tray_size):
+                              for x in range(tray_size):
+                                  r, g, b, a = pixels[x, y]
+                                  # 用原始 alpha 通道，颜色统一为黑色
+                                  tray_pixels[x, y] = (0, 0, 0, a)
+                          tray_img.save(tray_p)
+                          print(f'[inject] macOS tray icon: {tray_p}')
+                      except Exception as ex:
+                          print(f'[inject] ⚠️  tray_icon 生成跳过: {ex}')
+
                   print(f'[inject] ✅ 图标替换全部完成')
               except Exception as e:
                   import traceback
