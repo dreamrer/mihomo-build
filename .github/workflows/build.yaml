@@ -643,21 +643,22 @@ jobs:
                               _build_ico(img, str(p), _tray_ico_sizes)
                               print(f'[inject] assets/images ICO: {p}')
 
-                      # ── macOS tray template icon ──────────────
-                      # macOS 菜单栏 template image 需要纯黑+透明，44x44
-                      # 将 logo 缩放到 44x44，提取 alpha 通道作为黑色蒙版
+                      # ── macOS tray icon（彩色小图标，非 template）──
+                      # macOS 菜单栏用 isTemplate=false + 彩色图标
+                      # 缩放到 44x44 并加圆角，透明背景
                       tray_p = assets_img / 'tray_icon.png'
                       try:
                           tray_size = 44
                           tray_src = img.resize((tray_size, tray_size), Image.LANCZOS).convert('RGBA')
+                          # 创建圆角蒙版
+                          from PIL import ImageDraw
+                          mask = Image.new('L', (tray_size, tray_size), 0)
+                          md = ImageDraw.Draw(mask)
+                          radius = tray_size // 4  # 11px 圆角
+                          md.rounded_rectangle([0, 0, tray_size - 1, tray_size - 1], radius=radius, fill=255)
+                          # 合成：透明背景 + 圆角 logo
                           tray_img = Image.new('RGBA', (tray_size, tray_size), (0, 0, 0, 0))
-                          pixels = tray_src.load()
-                          tray_pixels = tray_img.load()
-                          for y in range(tray_size):
-                              for x in range(tray_size):
-                                  r, g, b, a = pixels[x, y]
-                                  # 用原始 alpha 通道，颜色统一为黑色
-                                  tray_pixels[x, y] = (0, 0, 0, a)
+                          tray_img.paste(tray_src, mask=mask)
                           tray_img.save(tray_p)
                           print(f'[inject] macOS tray icon: {tray_p}')
                       except Exception as ex:
