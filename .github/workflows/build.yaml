@@ -666,9 +666,10 @@ jobs:
 
                   print(f'[inject] ✅ 图标替换全部完成')
               except Exception as e:
-                  import traceback
-                  print(f'[inject] ⚠️  图标替换失败（跳过）: {e}')
+                  import traceback, sys
+                  print(f'[inject] ❌ 图标替换失败: {e}')
                   traceback.print_exc()
+                  sys.exit(1)  # 图标替换失败时中止构建，防止发布默认图标
 
           PYEOF
 
