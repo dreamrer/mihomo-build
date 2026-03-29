@@ -853,7 +853,7 @@ jobs:
             CGO_CFLAGS="-isysroot $SDK -arch arm64 -mios-version-min=14.0" \
             CGO_LDFLAGS="-isysroot $SDK" \
             CC="$CC" \
-            go build -buildmode=c-archive -o libclash.a ./...
+            go build -buildmode=c-archive -o libclash.a .
 
           # Verify Go build produced expected outputs
           if [ ! -f libclash.a ]; then
