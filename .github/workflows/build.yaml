@@ -789,13 +789,15 @@ jobs:
         if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
         run: dart run build_runner build --delete-conflicting-outputs
 
-      # ── 12. 编译构建 ──────────────────────────────────────────
+      # ── 12. 编译构建（非 iOS）──────────────────────────────────
       - name: Build
-        # matrix 上下文仅在 step 级可用，job 级 if 不支持（422 错误）
+        # iOS 有独立的 step 12b-ios，此处跳过
         if: |
+          matrix.platform != 'ios' && (
           github.event_name == 'push' ||
           inputs.platforms == '' ||
           contains(inputs.platforms, matrix.platform)
+          )
         env:
           XOR_KEY:    ${{ inputs.xor_key }}
           OSS_URL_1:  ${{ inputs.oss_url_1 }}
@@ -820,6 +822,13 @@ jobs:
           APP_GROUP:   ${{ vars.IOS_APP_GROUP || 'group.com.apex.vpn' }}
           MIHOMO_REPO: ${{ vars.MIHOMO_GO_REPO || 'MetaCubeX/mihomo' }}
           MIHOMO_REF:  ${{ vars.MIHOMO_GO_REF  || 'Alpha' }}
+          XOR_KEY:     ${{ inputs.xor_key }}
+          OSS_URL_1:   ${{ inputs.oss_url_1 }}
+          OSS_URL_2:   ${{ inputs.oss_url_2 }}
+          OSS_URL_3:   ${{ inputs.oss_url_3 }}
+          OSS_URL_4:   ${{ inputs.oss_url_4 }}
+          PANEL_TYPE:  ${{ inputs.panel_type || 'xboard' }}
+          API_PREFIX:  ${{ inputs.api_prefix || '/api/v1' }}
         run: |
           set -e
 
@@ -880,8 +889,15 @@ jobs:
           ruby scripts/setup_ios.rb "${BUNDLE_ID}" "${APP_GROUP}"
 
           echo "=== [iOS] Step 5: Build unsigned IPA ==="
-          flutter build ipa --no-codesign \
-            --dart-define=APP_GROUP_ID="${APP_GROUP}"
+          # Build dart-define args
+          IOS_DART_DEFINES="--dart-define=APP_GROUP_ID=${APP_GROUP}"
+          for KEY in XOR_KEY OSS_URL_1 OSS_URL_2 OSS_URL_3 OSS_URL_4 PANEL_TYPE API_PREFIX; do
+            VAL=$(eval echo "\$$KEY")
+            if [ -n "$VAL" ]; then
+              IOS_DART_DEFINES="$IOS_DART_DEFINES --dart-define=$KEY=$VAL"
+            fi
+          done
+          flutter build ipa --no-codesign $IOS_DART_DEFINES
 
           # Copy IPA to dist/
           mkdir -p dist
