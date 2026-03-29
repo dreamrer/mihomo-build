@@ -846,14 +846,29 @@ jobs:
             CC="$CC" \
             go build -buildmode=c-archive -o libclash.a ./...
 
+          # Verify Go build produced expected outputs
+          if [ ! -f libclash.a ]; then
+            echo "❌ Go build failed: libclash.a not found"
+            exit 1
+          fi
+          if [ ! -f libclash.h ]; then
+            echo "❌ Go build failed: libclash.h not found"
+            exit 1
+          fi
+          echo "[iOS] Go build output: $(ls -lh libclash.a libclash.h)"
+
           # Package as xcframework for Xcode linking
           xcodebuild -create-xcframework \
             -library libclash.a -headers libclash.h \
             -output libclash.xcframework
 
+          if [ ! -d libclash.xcframework ]; then
+            echo "❌ xcframework creation failed"
+            exit 1
+          fi
+
           mkdir -p "$GITHUB_WORKSPACE/ios/Frameworks"
           cp -r libclash.xcframework "$GITHUB_WORKSPACE/ios/Frameworks/"
-          cp libclash.h "$GITHUB_WORKSPACE/ios_sources/PacketTunnel/PacketTunnel-Bridging-Header.h"
           echo "[iOS] ✅ libclash.xcframework built and copied"
           cd "$GITHUB_WORKSPACE"
 
