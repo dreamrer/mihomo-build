@@ -251,10 +251,12 @@ jobs:
                   escaped_name = ''.join(
                       c if ord(c) < 128 else f'\\u{ord(c):04X}' for c in app_name
                   )
-                  p.write_text(re.sub(
+                  txt = p.read_text()
+                  txt = re.sub(
                       r'window\.Create\(L"[^"]*"',
-                      f'window.Create(L"{escaped_name}"', p.read_text()
-                  ), encoding='utf-8')
+                      lambda m: f'window.Create(L"{escaped_name}"', txt
+                  )
+                  p.write_text(txt, encoding='utf-8')
                   print(f'[inject] Windows window title → {app_name} (escaped: {escaped_name})')
               # Dart constant.dart（MaterialApp.title → 任务栏 / 窗口管理器显示名）
               p = Path('lib/common/constant.dart')
