@@ -245,13 +245,17 @@ jobs:
                   p.write_text(txt, encoding='utf-8')
                   print(f'[inject] Windows ProductName → {app_name}')
               # Windows main.cpp（Win32 窗口标题 → 任务栏显示名，支持中文）
+              # 将非 ASCII 字符转为 \uXXXX 转义，避免 MSVC 源文件编码问题
               p = Path('windows/runner/main.cpp')
               if p.exists():
+                  escaped_name = ''.join(
+                      c if ord(c) < 128 else f'\\u{ord(c):04X}' for c in app_name
+                  )
                   p.write_text(re.sub(
                       r'window\.Create\(L"[^"]*"',
-                      f'window.Create(L"{app_name}"', p.read_text()
+                      f'window.Create(L"{escaped_name}"', p.read_text()
                   ), encoding='utf-8')
-                  print(f'[inject] Windows window title → {app_name}')
+                  print(f'[inject] Windows window title → {app_name} (escaped: {escaped_name})')
               # Dart constant.dart（MaterialApp.title → 任务栏 / 窗口管理器显示名）
               p = Path('lib/common/constant.dart')
               if p.exists():
