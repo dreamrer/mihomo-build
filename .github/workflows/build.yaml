@@ -820,8 +820,6 @@ jobs:
           APP_VERSION: ${{ inputs.app_version }}
           BUNDLE_ID:   ${{ vars.IOS_BUNDLE_ID || 'com.apex.vpn' }}
           APP_GROUP:   ${{ vars.IOS_APP_GROUP || 'group.com.apex.vpn' }}
-          MIHOMO_REPO: ${{ vars.MIHOMO_GO_REPO || 'MetaCubeX/mihomo' }}
-          MIHOMO_REF:  ${{ vars.MIHOMO_GO_REF  || 'Alpha' }}
           XOR_KEY:     ${{ inputs.xor_key }}
           OSS_URL_1:   ${{ inputs.oss_url_1 }}
           OSS_URL_2:   ${{ inputs.oss_url_2 }}
@@ -840,20 +838,17 @@ jobs:
           export PATH="$(go env GOPATH)/bin:$PATH"
           go version
 
-          echo "=== [iOS] Step 2: Compile mihomo core for iOS arm64 ==="
-          mkdir -p /tmp/mihomo_build
-          git clone --depth 1 --branch "${MIHOMO_REF}" \
-            "https://github.com/${MIHOMO_REPO}.git" /tmp/mihomo_build/mihomo
-          cd /tmp/mihomo_build/mihomo
+          echo "=== [iOS] Step 2: Compile core for iOS arm64 ==="
+          cd core
 
-          # Cross-compile Go → iOS static archive
+          # Cross-compile Go → iOS static archive (from project's core/ directory)
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           CC=$(xcrun -f clang)
           CGO_ENABLED=1 GOOS=ios GOARCH=arm64 \
             CGO_CFLAGS="-isysroot $SDK -arch arm64 -mios-version-min=14.0" \
-            CGO_LDFLAGS="-isysroot $SDK" \
+            CGO_LDFLAGS="-isysroot $SDK -arch arm64" \
             CC="$CC" \
-            go build -buildmode=c-archive -o libclash.a .
+            go build -tags with_gvisor -buildmode=c-archive -o libclash.a .
 
           # Verify Go build produced expected outputs
           if [ ! -f libclash.a ]; then
@@ -867,8 +862,10 @@ jobs:
           echo "[iOS] Go build output: $(ls -lh libclash.a libclash.h)"
 
           # Package as xcframework for Xcode linking
+          mkdir -p headers
+          cp libclash.h headers/
           xcodebuild -create-xcframework \
-            -library libclash.a -headers libclash.h \
+            -library libclash.a -headers headers \
             -output libclash.xcframework
 
           if [ ! -d libclash.xcframework ]; then
