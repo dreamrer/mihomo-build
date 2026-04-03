@@ -951,69 +951,69 @@ jobs:
           flutter create --platforms=ios --org "${BUNDLE_ID%.*}" . || true
 
           echo "=== [iOS] Step 3b: Inject iOS app name and icon ==="
-          # Name injection (must happen AFTER flutter create generates ios/)
+          # Name and icon injection (must happen AFTER flutter create generates ios/)
           if [ -n "$APP_NAME" ] && [ -f ios/Runner/Info.plist ]; then
-            python3 -X utf8 << 'INJECT_EOF'
-          import re, os, io, urllib.request
-          from pathlib import Path
+          python3 -X utf8 << 'INJECT_EOF'
+import re, os, io, urllib.request
+from pathlib import Path
 
-          app_name = os.environ.get('APP_NAME', '').strip()
-          logo_url = os.environ.get('APP_LOGO_URL', '').strip()
+app_name = os.environ.get('APP_NAME', '').strip()
+logo_url = os.environ.get('APP_LOGO_URL', '').strip()
 
-          # ── Name injection ──
-          if app_name:
-              p = Path('ios/Runner/Info.plist')
-              if p.exists():
-                  txt = p.read_text()
-                  txt = re.sub(
-                      r'(<key>CFBundleName</key>\s*<string>)[^<]*(</string>)',
-                      rf'\g<1>{app_name}\g<2>', txt)
-                  if 'CFBundleDisplayName' in txt:
-                      txt = re.sub(
-                          r'(<key>CFBundleDisplayName</key>\s*<string>)[^<]*(</string>)',
-                          rf'\g<1>{app_name}\g<2>', txt)
-                  else:
-                      txt = txt.replace(
-                          '<key>CFBundleName</key>',
-                          f'<key>CFBundleDisplayName</key>\n\t<string>{app_name}</string>\n\t<key>CFBundleName</key>')
-                  p.write_text(txt)
-                  print(f'[inject-ios] CFBundleName/DisplayName → {app_name}')
+# ── Name injection ──
+if app_name:
+    p = Path('ios/Runner/Info.plist')
+    if p.exists():
+        txt = p.read_text()
+        txt = re.sub(
+            r'(<key>CFBundleName</key>\s*<string>)[^<]*(</string>)',
+            rf'\g<1>{app_name}\g<2>', txt)
+        if 'CFBundleDisplayName' in txt:
+            txt = re.sub(
+                r'(<key>CFBundleDisplayName</key>\s*<string>)[^<]*(</string>)',
+                rf'\g<1>{app_name}\g<2>', txt)
+        else:
+            txt = txt.replace(
+                '<key>CFBundleName</key>',
+                f'<key>CFBundleDisplayName</key>\n\t<string>{app_name}</string>\n\t<key>CFBundleName</key>')
+        p.write_text(txt)
+        print(f'[inject-ios] CFBundleName/DisplayName → {app_name}')
 
-          # ── Icon injection ──
-          if logo_url:
-              try:
-                  from PIL import Image
-                  import json as _json
-                  req = urllib.request.Request(logo_url, headers={'User-Agent': 'Mozilla/5.0'})
-                  raw = urllib.request.urlopen(req, timeout=30).read()
-                  img = Image.open(io.BytesIO(raw)).convert('RGBA')
-                  print(f'[inject-ios] logo downloaded: {img.size}')
+# ── Icon injection ──
+if logo_url:
+    try:
+        from PIL import Image
+        import json as _json
+        req = urllib.request.Request(logo_url, headers={'User-Agent': 'Mozilla/5.0'})
+        raw = urllib.request.urlopen(req, timeout=30).read()
+        img = Image.open(io.BytesIO(raw)).convert('RGBA')
+        print(f'[inject-ios] logo downloaded: {img.size}')
 
-                  appiconset = Path('ios/Runner/Assets.xcassets/AppIcon.appiconset')
-                  if appiconset.exists():
-                      contents_file = appiconset / 'Contents.json'
-                      if contents_file.exists():
-                          data = _json.loads(contents_file.read_text())
-                          processed = set()
-                          for item in data.get('images', []):
-                              fname = item.get('filename', '')
-                              if not fname or fname in processed:
-                                  continue
-                              processed.add(fname)
-                              size_str  = item.get('size', '')
-                              scale_str = item.get('scale', '1x')
-                              try:
-                                  base_px = int(size_str.split('x')[0])
-                                  scale   = int(scale_str.rstrip('x'))
-                                  px = base_px * scale
-                                  img.resize((px, px), Image.LANCZOS).save(appiconset / fname)
-                                  print(f'[inject-ios] icon: {fname} ({px}x{px})')
-                              except Exception as ex:
-                                  print(f'[inject-ios] icon {fname} skip: {ex}')
-                      print('[inject-ios] icon replacement done')
-              except Exception as e:
-                  print(f'[inject-ios] logo download/process failed: {e}')
-          INJECT_EOF
+        appiconset = Path('ios/Runner/Assets.xcassets/AppIcon.appiconset')
+        if appiconset.exists():
+            contents_file = appiconset / 'Contents.json'
+            if contents_file.exists():
+                data = _json.loads(contents_file.read_text())
+                processed = set()
+                for item in data.get('images', []):
+                    fname = item.get('filename', '')
+                    if not fname or fname in processed:
+                        continue
+                    processed.add(fname)
+                    size_str  = item.get('size', '')
+                    scale_str = item.get('scale', '1x')
+                    try:
+                        base_px = int(size_str.split('x')[0])
+                        scale   = int(scale_str.rstrip('x'))
+                        px = base_px * scale
+                        img.resize((px, px), Image.LANCZOS).save(appiconset / fname)
+                        print(f'[inject-ios] icon: {fname} ({px}x{px})')
+                    except Exception as ex:
+                        print(f'[inject-ios] icon {fname} skip: {ex}')
+            print('[inject-ios] icon replacement done')
+    except Exception as e:
+        print(f'[inject-ios] logo download/process failed: {e}')
+INJECT_EOF
           fi
 
           echo "=== [iOS] Step 4: Setup Xcode project (PacketTunnel extension) ==="
