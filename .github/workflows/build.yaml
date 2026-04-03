@@ -947,8 +947,14 @@ jobs:
           echo "[iOS] ✅ libclash.xcframework built and copied"
           cd "$GITHUB_WORKSPACE"
 
-          echo "=== [iOS] Step 3: Generate Flutter iOS project ==="
-          flutter create --platforms=ios --org "${BUNDLE_ID%.*}" . || true
+          echo "=== [iOS] Step 3: iOS project (committed, skip flutter create) ==="
+          # ios/ directory is already committed in the repo — no need for flutter create.
+          # Just verify it exists.
+          if [ ! -f ios/Runner.xcodeproj/project.pbxproj ]; then
+            echo "❌ ios/ directory not found in repo — aborting"
+            exit 1
+          fi
+          echo "[iOS] ✓ ios/ directory found"
 
           echo "=== [iOS] Step 3b: Inject iOS app name and icon ==="
           # Name and icon injection (must happen AFTER flutter create generates ios/)
