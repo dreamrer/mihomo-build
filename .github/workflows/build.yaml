@@ -296,6 +296,24 @@ jobs:
                           item['path'] = f'{mac_binary}.app'
                   p.write_text(_yaml_dmg.dump(dmg_cfg, default_flow_style=False, allow_unicode=True))
                   print(f'[inject] macOS DMG config → title={app_name}, app={mac_binary}.app')
+              # iOS Info.plist — CFBundleDisplayName + CFBundleName
+              p = Path('ios/Runner/Info.plist')
+              if p.exists():
+                  txt = p.read_text()
+                  txt = re.sub(
+                      r'(<key>CFBundleName</key>\s*<string>)[^<]*(</string>)',
+                      rf'\g<1>{app_name}\g<2>', txt)
+                  # Add CFBundleDisplayName if missing, or replace existing
+                  if 'CFBundleDisplayName' in txt:
+                      txt = re.sub(
+                          r'(<key>CFBundleDisplayName</key>\s*<string>)[^<]*(</string>)',
+                          rf'\g<1>{app_name}\g<2>', txt)
+                  else:
+                      txt = txt.replace(
+                          '<key>CFBundleName</key>',
+                          f'<key>CFBundleDisplayName</key>\n\t<string>{app_name}</string>\n\t<key>CFBundleName</key>')
+                  p.write_text(txt)
+                  print(f'[inject] iOS CFBundleName/DisplayName → {app_name}')
               # Linux CMakeLists.txt（CMake 不支持空格/特殊字符作为 target 名，与 Windows 处理一致）
               linux_binary = re.sub(r'[\s/\\:*?"<>|]+', '_', app_name)
               linux_binary = re.sub(r'[^\x00-\x7F]+', '', linux_binary)   # 去掉中文等非 ASCII
@@ -640,6 +658,30 @@ jobs:
                               except Exception as ex:
                                   print(f'[inject] ⚠️  macOS icon {fname} 跳过: {ex}')
                       print(f'[inject] macOS 图标替换完成')
+
+                  # ── iOS appiconset ─────────────────────────
+                  ios_appiconset = Path('ios/Runner/Assets.xcassets/AppIcon.appiconset')
+                  if ios_appiconset.exists():
+                      contents_file = ios_appiconset / 'Contents.json'
+                      if contents_file.exists():
+                          data = _json.loads(contents_file.read_text())
+                          processed = set()
+                          for item in data.get('images', []):
+                              fname = item.get('filename', '')
+                              if not fname or fname in processed:
+                                  continue
+                              processed.add(fname)
+                              size_str  = item.get('size', '')
+                              scale_str = item.get('scale', '1x')
+                              try:
+                                  base_px = int(size_str.split('x')[0])
+                                  scale   = int(scale_str.rstrip('x'))
+                                  px = base_px * scale
+                                  img.resize((px, px), Image.LANCZOS).save(ios_appiconset / fname)
+                                  print(f'[inject] iOS icon: {fname} ({px}x{px})')
+                              except Exception as ex:
+                                  print(f'[inject] ⚠️  iOS icon {fname} 跳过: {ex}')
+                      print(f'[inject] iOS 图标替换完成')
 
                   # ── assets/images/ ──────────────────────────
                   assets_img = Path('assets/images')
