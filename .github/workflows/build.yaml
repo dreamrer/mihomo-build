@@ -909,17 +909,34 @@ jobs:
           done
           flutter build ipa --no-codesign $IOS_DART_DEFINES
 
-          # Copy IPA to dist/
+          # Create IPA from xcarchive (Flutter --no-codesign skips IPA export)
           mkdir -p dist
-          IPA_PATH=$(find build/ios/ipa -name "*.ipa" | head -1)
-          if [ -n "$IPA_PATH" ]; then
-            APP_NAME_SAFE=$(echo "${APP_NAME:-Apex}" | tr '[:space:]/' '_')
-            cp "$IPA_PATH" "dist/${APP_NAME_SAFE}.ipa"
+          XCARCHIVE=$(find build/ios/archive -name "*.xcarchive" | head -1)
+          APP_NAME_SAFE=$(echo "${APP_NAME:-Apex}" | tr '[:space:]/' '_')
+
+          if [ -n "$XCARCHIVE" ]; then
+            echo "[iOS] Found xcarchive: $XCARCHIVE"
+            # Build IPA manually: Payload/Runner.app → .ipa (zip)
+            PAYLOAD_DIR=$(mktemp -d)/Payload
+            mkdir -p "$PAYLOAD_DIR"
+            cp -R "$XCARCHIVE/Products/Applications/"*.app "$PAYLOAD_DIR/"
+            # Include PacketTunnel extension if present
+            cd "$(dirname "$PAYLOAD_DIR")"
+            zip -qr "dist_ipa.ipa" Payload
+            cp "dist_ipa.ipa" "$OLDPWD/dist/${APP_NAME_SAFE}.ipa"
+            cd "$OLDPWD"
             echo "[iOS] ✅ IPA: dist/${APP_NAME_SAFE}.ipa ($(du -sh "dist/${APP_NAME_SAFE}.ipa" | cut -f1))"
           else
-            echo "[iOS] ⚠️ No IPA found in build/ios/ipa/"
-            ls -la build/ios/ipa/ 2>/dev/null || true
-            exit 1
+            # Fallback: check if Flutter generated IPA directly
+            IPA_PATH=$(find build/ios/ipa -name "*.ipa" 2>/dev/null | head -1)
+            if [ -n "$IPA_PATH" ]; then
+              cp "$IPA_PATH" "dist/${APP_NAME_SAFE}.ipa"
+              echo "[iOS] ✅ IPA: dist/${APP_NAME_SAFE}.ipa ($(du -sh "dist/${APP_NAME_SAFE}.ipa" | cut -f1))"
+            else
+              echo "[iOS] ❌ No xcarchive or IPA found"
+              ls -la build/ios/ 2>/dev/null || true
+              exit 1
+            fi
           fi
 
       # ── 12b. 重命名 Windows 输出文件（ASCII 名 → 完整 App 名）──
