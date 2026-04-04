@@ -1015,6 +1015,10 @@ jobs:
           echo "=== [iOS] Step 5: Build unsigned IPA ==="
           # Build dart-define args
           IOS_DART_DEFINES="--dart-define=APP_GROUP_ID=${APP_GROUP}"
+          # Mark as stable build (removes PRE banner)
+          if [ "${{ env.IS_STABLE }}" = "true" ]; then
+            IOS_DART_DEFINES="$IOS_DART_DEFINES --dart-define=APP_ENV=stable"
+          fi
           for KEY in XOR_KEY OSS_URL_1 OSS_URL_2 OSS_URL_3 OSS_URL_4 PANEL_TYPE API_PREFIX; do
             VAL=$(eval echo "\$$KEY")
             if [ -n "$VAL" ]; then
