@@ -113,6 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      has_matrix: ${{ steps.set-matrix.outputs.has_matrix }}
     steps:
       - name: Set build matrix
         id: set-matrix
@@ -151,9 +152,10 @@ jobs:
                 if item["platform"] in selected:
                   filtered.append(item)
 
-          matrix = json.dumps({"include": filtered})
+          matrix = json.dumps({"include": filtered}) if filtered else json.dumps({"include": [{"platform": "noop", "os": "ubuntu-latest"}]})
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
             f.write(f"matrix={matrix}\n")
+            f.write(f"has_matrix={'true' if filtered else 'false'}\n")
           EOF
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -161,6 +163,7 @@ jobs:
 
   build:
     needs: setup
+    if: needs.setup.outputs.has_matrix == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     defaults:
