@@ -1603,27 +1603,7 @@ jobs:
             local ipk_name="${APP_NAME}_${VER}_${ipk_arch}.ipk"
             (cd /tmp && ar r "$GITHUB_WORKSPACE/dist/$ipk_name" debian-binary control.tar.gz data.tar.gz 2>/dev/null)
 
-            # ── 打 .run（自解压脚本 + 内嵌 tar.gz）──
-            local payload="/tmp/payload-$arch.tar.gz"
-            (cd "$pkg" && tar czf "$payload" .)
-            local run_name="${APP_NAME}-openwrt-${arch}-${VER}.run"
-            local run_path="$GITHUB_WORKSPACE/dist/$run_name"
-            {
-              printf '#!/bin/sh\n'
-              printf '# Apex OpenWrt self-extracting installer\n'
-              printf 'set -e\n'
-              printf 'echo "[mihomo] extracting to /..."\n'
-              printf 'ARCHIVE_LINE=$(awk '"'"'/^__ARCHIVE_BELOW__/ {print NR + 1; exit 0;}'"'"' "$0")\n'
-              printf 'tail -n +"$ARCHIVE_LINE" "$0" | tar xzf - -C /\n'
-              printf '/etc/init.d/mihomo enable 2>/dev/null || true\n'
-              printf 'echo "[mihomo] installed. Run: /etc/init.d/mihomo start"\n'
-              printf 'exit 0\n'
-              printf '__ARCHIVE_BELOW__\n'
-            } > "$run_path"
-            cat "$payload" >> "$run_path"
-            chmod 755 "$run_path"
-
-            rm -rf "$pkg" "$ctl" "/tmp/mihomo-$arch" "$payload" /tmp/control.tar.gz /tmp/data.tar.gz /tmp/debian-binary
+            rm -rf "$pkg" "$ctl" "/tmp/mihomo-$arch" /tmp/control.tar.gz /tmp/data.tar.gz /tmp/debian-binary
           }
 
           build_arch amd64           amd64   "" ""
@@ -1671,6 +1651,46 @@ jobs:
           luci_ipk="luci-app-${APP_NAME}_${VER}_all.ipk"
           (cd /tmp && ar r "$GITHUB_WORKSPACE/dist/$luci_ipk" debian-binary control.tar.gz data.tar.gz 2>/dev/null)
           rm -rf "$luci_pkg" "$luci_ctl" /tmp/control.tar.gz /tmp/data.tar.gz /tmp/debian-binary
+
+          # ── 打 .run（内嵌 core.ipk + luci-app.ipk，用 opkg install 注册到包数据库）──
+          echo "=== Building .run installers ==="
+          build_run() {
+            local arch="$1" ipk_arch; ipk_arch="$(ipk_arch_name "$arch")"
+            local core_ipk="${APP_NAME}_${VER}_${ipk_arch}.ipk"
+            local luci="${APP_NAME}_${VER}_all.ipk"  # placeholder, overridden below
+            luci="luci-app-${APP_NAME}_${VER}_all.ipk"
+
+            # 组装 payload：两个 ipk 打成 tar.gz
+            local pay="/tmp/run-payload-$arch.tar.gz"
+            tar czf "$pay" -C "$GITHUB_WORKSPACE/dist" "$core_ipk" "$luci"
+
+            local run_name="${APP_NAME}-openwrt-${arch}-${VER}.run"
+            local run_path="$GITHUB_WORKSPACE/dist/$run_name"
+            {
+              printf '#!/bin/sh\n'
+              printf '# Apex OpenWrt installer (opkg-registered)\n'
+              printf 'set -e\n'
+              printf 'echo "[%s] installing via opkg..."\n' "$APP_NAME"
+              printf 'TMPDIR=$(mktemp -d -t apex-XXXXXX)\n'
+              printf 'trap "rm -rf $TMPDIR" EXIT\n'
+              printf 'ARCHIVE_LINE=$(awk '"'"'/^__ARCHIVE_BELOW__/ {print NR + 1; exit 0;}'"'"' "$0")\n'
+              printf 'tail -n +"$ARCHIVE_LINE" "$0" | tar xzf - -C "$TMPDIR"\n'
+              printf 'opkg update 2>/dev/null || true\n'
+              printf 'opkg install --force-reinstall "$TMPDIR/%s" "$TMPDIR/%s"\n' "$core_ipk" "$luci"
+              printf 'echo "[%s] installed. LuCI menu: Services -> Mihomo"\n' "$APP_NAME"
+              printf 'exit 0\n'
+              printf '__ARCHIVE_BELOW__\n'
+            } > "$run_path"
+            cat "$pay" >> "$run_path"
+            chmod 755 "$run_path"
+            rm -f "$pay"
+          }
+          build_run amd64
+          build_run arm64
+          build_run armv7
+          build_run armv5
+          build_run mips-softfloat
+          build_run mipsle-softfloat
 
           echo "=== All OpenWrt packages ==="
           ls -lh dist/
