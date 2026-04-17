@@ -20,10 +20,14 @@ OpenWrt packages contain the pre-compiled mihomo core binary along with init scr
 
 ### Install
 
-**Option A — opkg (ipk):**
+**Option A — opkg (ipk, recommended):**
 ```bash
+# Install core (pick the .ipk matching your router arch)
 opkg install mihomo_*_aarch64_generic.ipk
+# Install LuCI web UI (architecture-independent)
+opkg install luci-app-mihomo_*_all.ipk
 ```
+After install: LuCI → Services → Mihomo
 
 **Option B — self-extracting (.run):**
 ```bash

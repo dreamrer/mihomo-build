@@ -1633,6 +1633,45 @@ jobs:
           build_arch mips-softfloat  mips    "" softfloat
           build_arch mipsle-softfloat mipsle "" softfloat
 
+          # ── 打 luci-app-mihomo_*.ipk（arch=all，Lua 脚本无需编译）──
+          echo "=== Building luci-app-mihomo (all) ==="
+          luci_pkg="/tmp/pkg-luci"
+          mkdir -p "$luci_pkg"
+          cp -r openwrt-luci/luci-app-mihomo/files/. "$luci_pkg/"
+          find "$luci_pkg" -type f -name "*.lua"        -exec chmod 644 {} \;
+          find "$luci_pkg" -type f -name "*.htm"        -exec chmod 644 {} \;
+          find "$luci_pkg" -type f -name "*.json"       -exec chmod 644 {} \;
+          find "$luci_pkg/etc/uci-defaults" -type f -exec chmod 755 {} \;
+
+          luci_ctl="/tmp/ctl-luci"
+          mkdir -p "$luci_ctl"
+          {
+            printf 'Package: luci-app-%s\n'       "$APP_NAME"
+            printf 'Version: %s\n'                "$VER"
+            printf 'Architecture: all\n'
+            printf 'Maintainer: Apex <noreply@apex.local>\n'
+            printf 'Section: luci\n'
+            printf 'Priority: optional\n'
+            printf 'Depends: %s, luci-base, luci-compat\n' "$APP_NAME"
+            printf 'Description: LuCI web interface for %s (mihomo).\n' "$APP_NAME"
+          } > "$luci_ctl/control"
+          {
+            printf '#!/bin/sh\n'
+            printf '[ -n "${IPKG_INSTROOT}" ] && exit 0\n'
+            printf 'rm -f /tmp/luci-indexcache\n'
+            printf 'rm -rf /tmp/luci-modulecache/\n'
+            printf 'exit 0\n'
+          } > "$luci_ctl/postinst"
+          chmod 755 "$luci_ctl/postinst"
+
+          (cd "$luci_ctl" && tar czf /tmp/control.tar.gz ./control ./postinst)
+          (cd "$luci_pkg" && tar czf /tmp/data.tar.gz .)
+          echo "2.0" > /tmp/debian-binary
+
+          luci_ipk="luci-app-${APP_NAME}_${VER}_all.ipk"
+          (cd /tmp && ar r "$GITHUB_WORKSPACE/dist/$luci_ipk" debian-binary control.tar.gz data.tar.gz 2>/dev/null)
+          rm -rf "$luci_pkg" "$luci_ctl" /tmp/control.tar.gz /tmp/data.tar.gz /tmp/debian-binary
+
           echo "=== All OpenWrt packages ==="
           ls -lh dist/
 
