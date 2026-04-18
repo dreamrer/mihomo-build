@@ -1643,6 +1643,10 @@ jobs:
           {
             printf '#!/bin/sh\n'
             printf '[ -n "${IPKG_INSTROOT}" ] && exit 0\n'
+            # ✅ 写入应用显示名称到 UCI 配置（LuCI 菜单显示）
+            printf 'uci -q get mihomo.config >/dev/null 2>&1 || uci set mihomo.config=config\n'
+            printf 'uci set mihomo.config.app_name="%s"\n' "$APP_NAME"
+            printf 'uci commit mihomo\n'
             # 清 LuCI 缓存
             printf 'rm -f /tmp/luci-indexcache /tmp/luci-indexcache.*\n'
             printf 'rm -rf /tmp/luci-modulecache/\n'
