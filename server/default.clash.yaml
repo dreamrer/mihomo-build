@@ -1,0 +1,164 @@
+# ==============================================================================
+# Apex / 通用 Clash.Meta 模板（v2board / Xboard 通用）
+# ------------------------------------------------------------------------------
+# 设计：
+#   - 路由规则 = LAN 直连 + GEOIP CN 直连 + MATCH 走代理（去掉原版 400+ 行
+#     手维护的 DOMAIN-SUFFIX 列表，过期严重，GEOIP/geosite 覆盖 99%）
+#   - DNS 升级到 DoH/DoT，nameserver-policy 把 Google/Twitter/GitHub/AI 等
+#     直接走 Cloudflare DoH，绕过国内 DNS 被污染的常见域名
+#   - 代理组砍到 2 个：$app_name 选择器 + 自动选择（url-test，隐藏）
+#   - 保留 Apple 17.0.0.0/8 直连、Telegram IP-CIDR、fake-ip-filter（游戏/
+#     语音/Apple/Microsoft 联网检测必须 bypass）
+#
+# $app_name 占位符在 Apex.php / ClashMeta.php handle() 里被替换成机场品牌名。
+# ==============================================================================
+
+mixed-port: 7890
+allow-lan: true
+bind-address: "*"
+mode: rule
+log-level: info
+external-controller: 127.0.0.1:9090
+unified-delay: true
+tcp-concurrent: true
+
+dns:
+  enable: true
+  ipv6: false
+  use-hosts: true
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  proxy-server-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  # 这些域名 CN DNS 经常被污染或返回慢，直接走 Cloudflare DoH
+  nameserver-policy:
+    "+.google.com": "https://dns.cloudflare.com/dns-query"
+    "+.googleapis.com": "https://dns.cloudflare.com/dns-query"
+    "+.googleapis.cn": "https://dns.cloudflare.com/dns-query"
+    "+.googlevideo.com": "https://dns.cloudflare.com/dns-query"
+    "+.gstatic.com": "https://dns.cloudflare.com/dns-query"
+    "+.youtube.com": "https://dns.cloudflare.com/dns-query"
+    "+.youtu.be": "https://dns.cloudflare.com/dns-query"
+    "+.facebook.com": "https://dns.cloudflare.com/dns-query"
+    "+.twitter.com": "https://dns.cloudflare.com/dns-query"
+    "+.x.com": "https://dns.cloudflare.com/dns-query"
+    "+.github.com": "https://dns.cloudflare.com/dns-query"
+    "+.githubusercontent.com": "https://dns.cloudflare.com/dns-query"
+    "+.openai.com": "https://dns.cloudflare.com/dns-query"
+    "+.chatgpt.com": "https://dns.cloudflare.com/dns-query"
+    "+.anthropic.com": "https://dns.cloudflare.com/dns-query"
+  nameserver:
+    - https://doh.pub/dns-query
+    - https://dns.alidns.com/dns-query
+    - tls://dot.pub:853
+    - tls://dns.alidns.com:853
+  fallback:
+    - https://dns.cloudflare.com/dns-query
+    - https://dns.google/dns-query
+    - tls://1.1.1.1:853
+    - tls://8.8.8.8:853
+  fallback-filter:
+    geoip: true
+    geoip-code: CN
+    ipcidr:
+      - 0.0.0.0/8
+      - 10.0.0.0/8
+      - 100.64.0.0/10
+      - 127.0.0.0/8
+      - 169.254.0.0/16
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 224.0.0.0/4
+      - 240.0.0.0/4
+    domain:
+      - "+.google.com"
+      - "+.facebook.com"
+      - "+.youtube.com"
+      - "+.githubusercontent.com"
+      - "+.googlevideo.com"
+      - "+.googleapis.cn"
+  # 这几类域名走 fake-ip 会破协议（游戏 NAT、Apple 检测、xbox live、推送）
+  fake-ip-filter:
+    - "*.lan"
+    - "*.local"
+    - "*.localhost"
+    - "*.test"
+    - "localhost.ptlogin2.qq.com"
+    - "+.stun.*.*"
+    - "+.stun.*.*.*"
+    - "+.stun.*.*.*.*"
+    - "lens.l.google.com"
+    - "*.srv.nintendo.net"
+    - "+.stun.playstation.net"
+    - "xbox.*.*.microsoft.com"
+    - "*.*.xboxlive.com"
+    - "+.msftncsi.com"
+    - "+.msftconnecttest.com"
+
+proxies:
+
+proxy-groups:
+  - { name: "$app_name", type: select, proxies: ["自动选择"] }
+  - { name: "自动选择", type: url-test, hidden: true, proxies: [], url: "http://cp.cloudflare.com/generate_204", interval: 300, tolerance: 50 }
+
+rules:
+  # ── 本地直连 ──────────────────────────────────────────
+  - DOMAIN-SUFFIX,local,DIRECT
+  - DOMAIN-SUFFIX,localhost,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,17.0.0.0/8,DIRECT,no-resolve            # Apple 服务（iCloud / iMessage / 推送）
+  - IP-CIDR,198.18.0.0/16,DIRECT,no-resolve         # mihomo fake-ip 段
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - IP-CIDR,224.0.0.0/4,DIRECT,no-resolve
+  - IP-CIDR6,::1/128,DIRECT,no-resolve
+  - IP-CIDR6,fc00::/7,DIRECT,no-resolve
+  - IP-CIDR6,fe80::/10,DIRECT,no-resolve
+
+  # ── 广告/隐私追踪屏蔽 ──────────────────────────────────
+  - DOMAIN-KEYWORD,admarvel,REJECT
+  - DOMAIN-KEYWORD,admaster,REJECT
+  - DOMAIN-KEYWORD,adsage,REJECT
+  - DOMAIN-KEYWORD,adsmogo,REJECT
+  - DOMAIN-KEYWORD,adsrvmedia,REJECT
+  - DOMAIN-KEYWORD,adservice,REJECT
+  - DOMAIN-KEYWORD,domob,REJECT
+  - DOMAIN-KEYWORD,duomeng,REJECT
+  - DOMAIN-KEYWORD,dwtrack,REJECT
+  - DOMAIN-KEYWORD,guanggao,REJECT
+  - DOMAIN-KEYWORD,lianmeng,REJECT
+  - DOMAIN-KEYWORD,mopub,REJECT
+  - DOMAIN-KEYWORD,partnerad,REJECT
+  - DOMAIN-KEYWORD,pingfore,REJECT
+  - DOMAIN-KEYWORD,supersonicads,REJECT
+  - DOMAIN-KEYWORD,umeng,REJECT
+  - DOMAIN-KEYWORD,wlmonitor,REJECT
+  - DOMAIN-KEYWORD,zjtoolbar,REJECT
+  - DOMAIN-SUFFIX,appsflyer.com,REJECT
+  - DOMAIN-SUFFIX,doubleclick.net,REJECT
+  - DOMAIN-SUFFIX,mmstat.com,REJECT
+  - DOMAIN-SUFFIX,vungle.com,REJECT
+
+  # ── Telegram（GEOIP 不一定准，显式 CIDR 兜底） ──────────
+  - IP-CIDR,91.108.4.0/22,$app_name,no-resolve
+  - IP-CIDR,91.108.8.0/21,$app_name,no-resolve
+  - IP-CIDR,91.108.16.0/22,$app_name,no-resolve
+  - IP-CIDR,91.108.56.0/22,$app_name,no-resolve
+  - IP-CIDR,149.154.160.0/20,$app_name,no-resolve
+  - IP-CIDR6,2001:67c:4e8::/48,$app_name,no-resolve
+  - IP-CIDR6,2001:b28:f23d::/48,$app_name,no-resolve
+  - IP-CIDR6,2001:b28:f23f::/48,$app_name,no-resolve
+
+  # ── Google 中国服务（services.googleapis.cn / Play 中国镜像） ──
+  - DOMAIN-SUFFIX,services.googleapis.cn,$app_name
+  - DOMAIN-SUFFIX,xn--ngstr-lra8j.com,$app_name
+
+  # ── 兜底：中国 IP 直连，其它走代理 ──────────────────────
+  - GEOIP,CN,DIRECT
+  - MATCH,$app_name
