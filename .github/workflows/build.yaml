@@ -565,12 +565,44 @@ jobs:
           if logo_url:
               try:
                   import json as _json
+                  import time as _time
                   from PIL import Image
 
-                  # 下载图片（带 User-Agent，支持重定向）
-                  req = urllib.request.Request(logo_url, headers={'User-Agent': 'Mozilla/5.0'})
-                  with urllib.request.urlopen(req, timeout=30) as r:
-                      img = Image.open(io.BytesIO(r.read())).convert('RGBA')
+                  # ── Logo 下载：带重试 + Content-Type 校验 + 10MB 上限 ─────
+                  # 之前一次失败就 sys.exit(1) 整 build 报销。常见误伤：
+                  #   - 图床瞬时 5xx / DNS 抽风 / 网络抖动
+                  #   - CDN 返回 200 + HTML 错误页（PIL 才在 Image.open 抛错）
+                  #   - 配错的图床给个超大文件让 runner OOM
+                  # 加 3 次指数退避（1s/2s/4s）+ Content-Type 检查 + 大小硬上限。
+                  # 真 404 / 真错误图片仍然会重试 3 次后 fail-fast，瞬时抖动救回。
+                  _LOGO_MAX_BYTES = 10 * 1024 * 1024  # 10MB
+                  _LOGO_RETRIES = 3
+
+                  def _download_logo(url):
+                      last_exc = None
+                      for attempt in range(_LOGO_RETRIES):
+                          try:
+                              req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                              with urllib.request.urlopen(req, timeout=30) as r:
+                                  ctype = (r.headers.get('Content-Type') or '').lower()
+                                  if ctype and 'image' not in ctype and 'octet-stream' not in ctype:
+                                      raise ValueError(f'非图片响应 (Content-Type={ctype!r})，可能是 CDN 错误页')
+                                  clen = int(r.headers.get('Content-Length') or 0)
+                                  if clen and clen > _LOGO_MAX_BYTES:
+                                      raise ValueError(f'图片大小 {clen} 超过 {_LOGO_MAX_BYTES} 上限')
+                                  data = r.read(_LOGO_MAX_BYTES + 1)
+                                  if len(data) > _LOGO_MAX_BYTES:
+                                      raise ValueError(f'图片大小超过 {_LOGO_MAX_BYTES} 上限（streaming）')
+                              return Image.open(io.BytesIO(data)).convert('RGBA')
+                          except (urllib.error.URLError, ConnectionError, ValueError, OSError) as e:
+                              last_exc = e
+                              if attempt < _LOGO_RETRIES - 1:
+                                  wait = 2 ** attempt  # 1s, 2s
+                                  print(f'[inject] Logo 下载第 {attempt + 1}/{_LOGO_RETRIES} 次失败: {e}，{wait}s 后重试')
+                                  _time.sleep(wait)
+                      raise last_exc if last_exc else RuntimeError('logo download failed')
+
+                  img = _download_logo(logo_url)
                   print(f'[inject] Logo 下载成功: {img.size}')
 
                   # ── Android mipmap ──────────────────────────
