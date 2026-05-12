@@ -132,16 +132,6 @@ on:
         required: false
         default: ''
 
-      android_build_mode:
-        description: 'Android 包模式：split=分架构(默认) / universal=单通用包 / all=两者都出'
-        required: false
-        default: 'split'
-        type: choice
-        options:
-          - split
-          - universal
-          - all
-
 env:
   PRIVATE_REF: ${{ github.event_name == 'push' && github.ref_name || inputs.ref }}
   IS_STABLE: ${{ github.event_name == 'push' && !contains(github.ref, '-') || github.event_name != 'push' && !contains(inputs.ref, '-') }}
@@ -999,7 +989,6 @@ jobs:
           API_PREFIX: ${{ inputs.api_prefix || '/api/v1' }}
           DELAY_DISCOUNT: ${{ inputs.delay_discount }}
           ANDROID_FLAVOR: ${{ matrix.flavor || '' }}
-          ANDROID_BUILD_MODE: ${{ inputs.android_build_mode || 'split' }}
         run: |
           dart setup.dart ${{ matrix.platform }} \
             ${{ matrix.arch && format('--arch {0}', matrix.arch) || '' }} \
