@@ -6,7 +6,7 @@ Multi-platform build pipeline for Apex VPN client. Releases are published here a
 
 | Platform | Architecture | Format |
 |----------|-------------|--------|
-| Android | arm64-v8a + armeabi-v7a (fat APK) | APK |
+| Android | arm64-v8a / armeabi-v7a / universal(v8a+v7a) / emulator(x86_64) | 4× APK |
 | Android TV | arm64-v8a + armeabi-v7a (fat APK) | APK |
 | Windows | x86_64 | EXE (Inno Setup) |
 | macOS | Universal (Apple Silicon + Intel) | DMG |
