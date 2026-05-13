@@ -35,6 +35,32 @@ class Apex extends ClashMeta
     // 必填：加密密钥（必须与客户端打包时 XOR_KEY 完全一致）
     private $encryptKey = '';
 
+    /**
+     * Xboard schema 适配：把节点 protocol_settings.tls 嵌套对象平铺到
+     * $server['tls_settings']，让父类 buildAnyTLS / buildTuic / buildHysteria2
+     * 读 tls_settings 时能取到 server_name / allow_insecure。
+     *
+     * 背景：部分 Xboard fork 的 ClashMeta::buildAnyTLS 还是 v2board 风格（读
+     * $server['tls_settings']），但 Xboard 节点把 tls 嵌套在 protocol_settings.tls
+     * 下，导致 sni 字段全空，客户端 TLS ClientHello 缺 SNI → 握手失败（EOF）。
+     *
+     * 三种部署都安全：
+     *   • v2board 原版面板：节点没 protocol_settings 字段，foreach 跳过
+     *   • cedar2025/Xboard master：父类用 data_get 读嵌套，多加的字段不读，零影响
+     *   • 老 Xboard fork / 魔改 fork：兜住 sni 不为空
+     */
+    public function __construct($user, $servers)
+    {
+        foreach ($servers as $i => $s) {
+            if (isset($s['protocol_settings']['tls'])
+                && is_array($s['protocol_settings']['tls'])
+                && empty($s['tls_settings'])) {
+                $servers[$i]['tls_settings'] = $s['protocol_settings']['tls'];
+            }
+        }
+        parent::__construct($user, $servers);
+    }
+
     public function handle()
     {
         if ($this->encryptKey === '') {
