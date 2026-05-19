@@ -1177,11 +1177,21 @@ jobs:
             echo "[iOS] === Tail 80 lines of xcodebuild ==="
             tail -80 /tmp/pt_build.log
           fi
+          # 关键：scheme build 失败时即使有残留 .appex 也不要信（缺 Info.plist / 没 link，codesign 会拒绝），
+          # 删掉 build/ios/extension 强制走 scheme-less -target 兜底重建。
+          # scheme build 引入了一堆无关 Flutter plugin（video_player/just_audio/...）这些 plugin 需要
+          # Flutter/Flutter.h 但 PacketTunnel target 没配 FlutterFramework SPM 依赖 → 编译失败，
+          # PacketTunnel 自身虽然产出了部分文件但 bundle 不完整。
           APPEX_BUILT=$(find build/ios/extension -name "PacketTunnel.appex" -type d 2>/dev/null | head -1)
-          if [ -n "$APPEX_BUILT" ]; then
+          if [ "${PT_EXIT}" -eq 0 ] && [ -n "$APPEX_BUILT" ]; then
             echo "[iOS] ✅ PacketTunnel.appex built: $APPEX_BUILT"
           else
-            echo "[iOS] ⚠️ xcodebuild for PacketTunnel may have failed, trying scheme-less build..."
+            if [ -n "$APPEX_BUILT" ]; then
+              echo "[iOS] ⚠️ scheme build 失败但有残留 .appex（不完整），删除后用 scheme-less 重建"
+              rm -rf build/ios/extension
+            else
+              echo "[iOS] ⚠️ xcodebuild for PacketTunnel may have failed, trying scheme-less build..."
+            fi
             set +o pipefail
             xcodebuild -project ios/Runner.xcodeproj \
               -target PacketTunnel \
