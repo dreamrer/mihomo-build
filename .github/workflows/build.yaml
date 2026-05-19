@@ -1155,6 +1155,9 @@ jobs:
           # flutter build ipa only builds the Runner target — the PacketTunnel
           # extension target (added by setup_ios.rb) is not compiled by Flutter.
           echo "=== [iOS] Step 5b: Build PacketTunnel extension ==="
+          # 关 pipefail：让 xcodebuild 失败时不立刻终止整个 step（下面有兜底 scheme-less + 完整日志）
+          # 用 tee 把完整输出写到 /tmp/pt_*.log，事后用 grep 抓 error: 行，避免 tail -20 截掉真正的报错
+          set +o pipefail
           xcodebuild -workspace ios/Runner.xcworkspace \
             -scheme PacketTunnel \
             -configuration Release \
@@ -1164,12 +1167,22 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             ONLY_ACTIVE_ARCH=NO \
             BUILD_DIR="$(pwd)/build/ios/extension" \
-            2>&1 | tail -20
+            2>&1 | tee /tmp/pt_build.log > /dev/null
+          PT_EXIT=${PIPESTATUS[0]}
+          set -o pipefail
+          echo "[iOS] xcodebuild scheme PacketTunnel exit=${PT_EXIT}"
+          if [ "${PT_EXIT}" -ne 0 ]; then
+            echo "[iOS] === error: / warning: lines ==="
+            grep -nE "error:|fatal error|cannot find|undefined" /tmp/pt_build.log | head -60 || echo "[iOS] (no error lines matched)"
+            echo "[iOS] === Tail 80 lines of xcodebuild ==="
+            tail -80 /tmp/pt_build.log
+          fi
           APPEX_BUILT=$(find build/ios/extension -name "PacketTunnel.appex" -type d 2>/dev/null | head -1)
           if [ -n "$APPEX_BUILT" ]; then
             echo "[iOS] ✅ PacketTunnel.appex built: $APPEX_BUILT"
           else
             echo "[iOS] ⚠️ xcodebuild for PacketTunnel may have failed, trying scheme-less build..."
+            set +o pipefail
             xcodebuild -project ios/Runner.xcodeproj \
               -target PacketTunnel \
               -configuration Release \
@@ -1179,7 +1192,16 @@ jobs:
               CODE_SIGNING_ALLOWED=NO \
               ONLY_ACTIVE_ARCH=NO \
               BUILD_DIR="$(pwd)/build/ios/extension" \
-              2>&1 | tail -20
+              2>&1 | tee /tmp/pt_build_target.log > /dev/null
+            PT2_EXIT=${PIPESTATUS[0]}
+            set -o pipefail
+            echo "[iOS] xcodebuild target PacketTunnel exit=${PT2_EXIT}"
+            if [ "${PT2_EXIT}" -ne 0 ]; then
+              echo "[iOS] === error: lines (target mode) ==="
+              grep -nE "error:|fatal error|cannot find|undefined" /tmp/pt_build_target.log | head -60 || echo "[iOS] (no error lines matched)"
+              echo "[iOS] === Tail 80 lines (target mode) ==="
+              tail -80 /tmp/pt_build_target.log
+            fi
             APPEX_BUILT=$(find build/ios/extension -name "PacketTunnel.appex" -type d 2>/dev/null | head -1)
             if [ -n "$APPEX_BUILT" ]; then
               echo "[iOS] ✅ PacketTunnel.appex built (target mode): $APPEX_BUILT"
