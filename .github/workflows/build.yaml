@@ -242,7 +242,7 @@ jobs:
           python3 -m pip install Pillow pyyaml pypinyin --quiet --user 2>/dev/null || \
           python3 -m pip install Pillow pyyaml pypinyin --quiet
           python3 -X utf8 << 'PYEOF'
-          import os, re, io, urllib.request
+          import os, re, io, time, urllib.request
           from pathlib import Path
 
           def env(k, d=''):
@@ -491,8 +491,16 @@ jobs:
           if ver:
               p = Path('pubspec.yaml')
               txt = p.read_text()
-              # Flutter 要求 version: X.Y.Z+buildNumber，缺少 +N 会导致版本不生效
-              pubspec_ver = ver if '+' in ver else f'{ver}+1'
+              # Flutter 要求 version: X.Y.Z+buildNumber，buildNumber 即 Android versionCode。
+              # Android 判断"哪个版本新"看的是 versionCode（整数）不是 versionName 字符串。
+              # 旧实现固定补 "+1" → 每次打包 versionCode 都是 1 → 用户从旧版升级新版被拒
+              # ("已安装更高版本"，或显示为相同版本无法覆盖)。
+              # 改用当前 UTC 秒级时间戳当 buildNumber，保证每次 CI 跑 versionCode 单调递增。
+              if '+' in ver:
+                  pubspec_ver = ver
+              else:
+                  build_no = int(time.time())   # 2025-11+ 起约 17 亿，int32 上限 21 亿，仍安全
+                  pubspec_ver = f'{ver}+{build_no}'
               txt = re.sub(r'^(version:\s*)\S+', rf'\g<1>{pubspec_ver}',
                            txt, flags=re.MULTILINE)
               p.write_text(txt)
