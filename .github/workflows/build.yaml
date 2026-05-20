@@ -121,6 +121,10 @@ on:
         description: 'Crisp 客服 ID（留空=不启用）'
         required: false
         default: ''
+      crisp_proxy_url:
+        description: 'Crisp 反代域名（解决国内卡顿，留空=用默认 go.crisp.chat）'
+        required: false
+        default: ''
       salesmartly_token:
         description: 'Salesmartly 客服 Token（留空=不启用，优先于 Crisp）'
         required: false
