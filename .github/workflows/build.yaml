@@ -112,6 +112,17 @@ on:
         required: false
         default: ''
 
+      # ── Mihomo 反风控代号（绕过小米/华为/OPPO 风控扫描）──
+      # 编译时注入 mihomo 内核显示用的字符串特征（const Name / MihomoName /
+      # Version / TUN TableName / route hello 等 4-6 处）。
+      # 留空 = workflow 自动生成 6 位随机 hex（每次出包不同代号，
+      # 让厂商扫描器学不到固定签名）。
+      # 自定义 = [A-Za-z0-9_-]{1,32}（详见 scripts/obfuscate_mihomo.sh 校验）
+      mihomo_tag:
+        description: 'Mihomo 反风控代号（留空=自动随机；自定义需 [A-Za-z0-9_-]{1,32}）'
+        required: false
+        default: ''
+
       # ── 客服 & 联系方式（写入远程配置，不烧录进包）─────────
       telegram_channel:
         description: 'TG 订阅频道（如 https://t.me/jichangbiji，写入远程配置）'
@@ -978,6 +989,32 @@ jobs:
         if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
         run: dart run build_runner build --delete-conflicting-outputs
 
+      # ── 11b. 计算 MIHOMO_TAG（反风控代号）──────────────────────
+      # 留空 → 自动生成 6 位 hex（带 'apx' 前缀确保首字符是字母），让每次出包代号
+      # 不同，国产手机厂商风控扫描器难以学到固定特征签名。
+      # 用户输入 → 校验白名单字符集，写入 GITHUB_ENV 让后续 step 共享。
+      # matrix 多平台并行时**每个 platform 独立计算**——4 个 APK + Win/Mac/Linux
+      # 出来各自代号，扫描器更难关联同一来源。
+      - name: Compute MIHOMO_TAG
+        if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
+        shell: bash
+        run: |
+          USER_TAG="${{ inputs.mihomo_tag }}"
+          if [ -z "$USER_TAG" ]; then
+            # 6 位 hex + apx 前缀（首字符必须字母，否则 Go const 字符串里某些场景报错）
+            TAG="apx$(openssl rand -hex 3)"
+            echo "[mihomo_tag] auto-generated: $TAG"
+          else
+            # 用户输入：必须只含 [A-Za-z0-9_-] 且 ≤ 32（与 scripts/obfuscate_mihomo.sh 校验一致）
+            if ! [[ "$USER_TAG" =~ ^[A-Za-z0-9_-]+$ ]] || [ ${#USER_TAG} -gt 32 ]; then
+              echo "❌ inputs.mihomo_tag 不合法（需 [A-Za-z0-9_-]{1,32}）: '$USER_TAG'"
+              exit 1
+            fi
+            TAG="$USER_TAG"
+            echo "[mihomo_tag] user-provided: $TAG"
+          fi
+          echo "MIHOMO_TAG=$TAG" >> "$GITHUB_ENV"
+
       # ── 12. 编译构建（非 iOS）──────────────────────────────────
       - name: Build
         # iOS 有独立的 step 12b-ios，此处跳过
@@ -1001,6 +1038,8 @@ jobs:
           API_PREFIX: ${{ inputs.api_prefix || '/api/v1' }}
           DELAY_DISCOUNT: ${{ inputs.delay_discount }}
           ANDROID_FLAVOR: ${{ matrix.flavor || '' }}
+          # ↓ setup.dart::Build.mihomoTag 读这个，触发 mihomo 源码 patch + ldflags 注入
+          MIHOMO_TAG: ${{ env.MIHOMO_TAG }}
         run: |
           dart setup.dart ${{ matrix.platform }} \
             ${{ matrix.arch && format('--arch {0}', matrix.arch) || '' }} \
@@ -1028,6 +1067,9 @@ jobs:
           PANEL_TYPE:  ${{ inputs.panel_type || 'xboard' }}
           API_PREFIX:  ${{ inputs.api_prefix || '/api/v1' }}
           DELAY_DISCOUNT: ${{ inputs.delay_discount }}
+          # iOS 也走 mihomo 字符串脱敏（虽然 Apple Store 没小米那种风控扫描，
+          # 但侧载/TestFlight 检测工具同样看 binary 特征——一致性 + 防未来收紧）
+          MIHOMO_TAG: ${{ env.MIHOMO_TAG }}
         run: |
           set -e
 
@@ -1038,6 +1080,13 @@ jobs:
           brew install go || true
           export PATH="$(go env GOPATH)/bin:$PATH"
           go version
+
+          # ── 反风控：patch mihomo 源码 + 退出时还原 ──
+          # 注：iOS 这个 step 是手写 go build，没经 setup.dart::buildCore，
+          # 所以 obfuscate/restore 也要手动调（跟 setup.dart 里 try/finally 等价）。
+          echo "=== [iOS] Step 1b: Obfuscate mihomo strings (TAG=$MIHOMO_TAG) ==="
+          TAG="$MIHOMO_TAG" bash scripts/obfuscate_mihomo.sh
+          trap 'echo "[iOS] restore mihomo source"; git -C core/Clash.Meta restore . || true' EXIT
 
           echo "=== [iOS] Step 2: Compile core for iOS arm64 ==="
           cd core
@@ -1053,7 +1102,9 @@ jobs:
             CGO_CFLAGS="-isysroot $SDK -arch arm64 -mios-version-min=14.0" \
             CGO_LDFLAGS="-isysroot $SDK -arch arm64" \
             CC="$CC" \
-            go build -tags with_gvisor -buildmode=c-archive -o libclash.a .
+            go build -tags with_gvisor \
+              -ldflags="-X 'github.com/metacubex/mihomo/constant.MihomoName=$MIHOMO_TAG' -X 'github.com/metacubex/mihomo/constant.Version=$MIHOMO_TAG-1.0'" \
+              -buildmode=c-archive -o libclash.a .
 
           # Verify Go build produced expected outputs
           if [ ! -f libclash.a ]; then
