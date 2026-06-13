@@ -947,6 +947,37 @@ jobs:
           go-version: stable
           cache: false
 
+      # ── 6b. Android: 显式装 NDK（绕过 AGP 自动下载的不稳定）──────
+      # 失败案例：runs/27434842730 — AGP 调 Google SDK Manager 在线拉
+      # ndk;28.0.13004108，下载到的不是 zip（HTML 错误页 / CDN 截断 /
+      # 网络抖动），ZipException 直接挂掉。
+      #
+      # 这里用 nttld/setup-ndk 提前装好同样的精确版本（与
+      # android/app/build.gradle.kts::ndkVersion 严格一致），AGP 看到本地有
+      # 就不会去 Google 拉了。同时 export ANDROID_NDK 让 setup.dart::_getCc
+      # 跨编译 libclash.so 时也用同一份 NDK，保证 mihomo go build 和 Flutter
+      # Android build 链接器一致。
+      - name: Setup Android NDK
+        if: matrix.platform == 'android' && (github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform))
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          # 与 android/app/build.gradle.kts ndkVersion 必须精确匹配
+          ndk-version: r28
+          local-cache: true
+          add-to-path: false
+
+      - name: Export ANDROID_NDK
+        if: matrix.platform == 'android' && (github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform))
+        run: |
+          # setup.dart::_getCc 读 ANDROID_NDK（无 _HOME/_ROOT 后缀），
+          # nttld/setup-ndk 默认只设 ANDROID_NDK_HOME——补一行让 setup.dart 看到
+          NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
+          echo "ANDROID_NDK=$NDK_PATH" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK_PATH" >> "$GITHUB_ENV"
+          echo "[setup-ndk] ANDROID_NDK=$NDK_PATH"
+
       # ── 7. 安装 Flutter ──────────────────────────────────────
       - name: Setup Flutter
         if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
