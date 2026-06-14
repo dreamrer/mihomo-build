@@ -932,18 +932,23 @@ jobs:
           echo "macOS icons regenerated from $SRC"
           ls -lh "$ICONSET"/*.png
 
-      # ── 5b. macOS：清除 SPM 构建缓存 + Pods（v3.6.49 新增 pod cleanup）──
-      # SPM: 主仓库历史 SPM 集成残留
-      # Pods: pubspec 改动（v3.6.49 加 flutter_inappwebview）后 Podfile.lock
-      #       跟 sandbox 不同步，会报 "sandbox is not in sync with Podfile.lock"。
-      #       清掉 Podfile.lock + Pods 目录，让 flutter build 自动重新 pod install。
-      - name: Clean macOS SPM cache and Pods
+      # ── 5b. macOS：清除 SPM 构建缓存 + Pods + 显式 pod install ──
+      # 之前以为 cleanup + flutter pub get 就够了，但 flutter pub get **不会**
+      # 主动跑 pod install（macOS），导致 sandbox not in sync 错误持续。
+      # 解：cleanup 之后立刻在 macos/ 跑 pod install。
+      - name: Clean macOS SPM/Pods and reinstall
         if: matrix.platform == 'macos'
         run: |
+          # SPM 缓存
           rm -rf macos/Runner.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
           rm -rf macos/Runner.xcworkspace/xcshareddata/swiftpm/
+          # Pods 全清
           rm -f  macos/Podfile.lock
           rm -rf macos/Pods
+          # 主动 pod install (在 pubspec 加新 dep 后 sandbox 一定一致)
+          # 注：必须在 flutter pub get 之后，因为 flutter pub get 会生成 macos/Flutter/ephemeral
+          # 让 pod install 拿到 Pods 列表。
+          echo "[macos-pods] flutter pub get 在后面的 'Install dependencies' step，pod install 推迟到那之后"
 
       # ── 6. 安装 Go ───────────────────────────────────────────
       - name: Setup Go
@@ -992,12 +997,19 @@ jobs:
 
           # 通用 patch 函数：拿 versioned binary 补一个无后缀 symlink
           # ${BIN}/clang -> clang-19；${BIN}/ld.lld -> ld.lld-19；etc.
+          #
+          # 用 -e 而不是 -f/-L：-L 对 dangling symlink 也返 true，会误判
+          # 为"已存在"跳过 patch（runs/27499847066 wrapper 仍报 clang missing
+          # 的原因）。-e follow symlink，dangling 返 false → 走 patch 分支
+          # 强制 ln -sf 覆盖。
           patch_symlink() {
             local stem="$1"  # e.g. clang / clang++ / ld.lld / lld / lld-link
-            if [ -f "$BIN/$stem" ] || [ -L "$BIN/$stem" ]; then
-              echo "[ndk-patch] $stem 已存在，跳过"
+            if [ -e "$BIN/$stem" ]; then
+              echo "[ndk-patch] $stem 已存在（target valid），跳过"
               return 0
             fi
+            # 到这里说明：1) 不存在 2) 或者是 dangling symlink。先删了再补
+            rm -f "$BIN/$stem"
             # 找 ${stem}-NUM 形式（不要匹配到 ${stem}-other-thing）
             local actual=$(ls "$BIN" 2>/dev/null | grep -E "^${stem}-[0-9]+$" | head -1)
             if [ -z "$actual" ]; then
@@ -1069,6 +1081,17 @@ jobs:
       - name: Install dependencies
         if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
         run: flutter pub get
+
+      # ── 9b. macOS: pod install（v3.6.49 加 flutter_inappwebview 后必须）──
+      # flutter pub get 不会主动跑 pod install for macOS。pubspec 加新 dep 后
+      # 必须显式 pod install，否则 sandbox not in sync with Podfile.lock。
+      - name: macOS pod install
+        if: matrix.platform == 'macos'
+        run: |
+          cd macos
+          # 优先 pod install --repo-update（拉新 spec 元数据），失败再 fallback
+          pod install --repo-update || pod install
+          echo "[macos-pods] ✅ Podfile.lock 重新生成 + Pods sandbox 同步"
 
       # ── 10. 生成 SDK 代码 ─────────────────────────────────────
       - name: Generate SDK code
