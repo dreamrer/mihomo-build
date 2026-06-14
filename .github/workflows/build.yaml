@@ -962,12 +962,37 @@ jobs:
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
-          # 与 android/app/build.gradle.kts ndkVersion 严格匹配——之前用 r28
-          # 短码，setup-ndk 装的 wrapper 引用 `clang` 但找不到（runs/27492755820
-          # 失败原因），改用精确版本号绕开 broken wrapper。
-          ndk-version: 28.0.13004108
+          # 跟 android/app/build.gradle.kts ndkVersion="28.0.13004108" 对齐。
+          # nttld/setup-ndk@v1 只接受 'r28' 这种 release 短码，精确版本号
+          # 28.0.13004108 返 404（runs/27492971975 验证）。下面的 patch step
+          # 修 r28 的 broken wrapper（runs/27492755820 失败原因）。
+          ndk-version: r28
           local-cache: true
           add-to-path: false
+
+      # NDK r28 上游 release 的 wrapper script bug：
+      #   .../bin/armv7a-linux-androideabi21-clang: line 4:
+      #   .../bin/clang: No such file or directory
+      # 实际 bin 目录里有 clang-19 / clang-20 之类，但缺 `clang` 这个名字的
+      # symlink。手动 ln -sf 补上让 wrapper 能找到。
+      - name: Patch NDK r28 clang symlink (workaround broken wrapper)
+        if: matrix.platform == 'android' && (github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform))
+        run: |
+          NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          if [ ! -f "$BIN/clang" ]; then
+            ACTUAL=$(ls "$BIN"/clang-* 2>/dev/null | grep -E 'clang-[0-9]+$' | head -1 | xargs -n1 basename)
+            if [ -z "$ACTUAL" ]; then
+              echo "[ndk-patch] ❌ 找不到任何 clang-* binary"
+              ls -la "$BIN" | head -40
+              exit 1
+            fi
+            ln -sf "$ACTUAL" "$BIN/clang"
+            ln -sf "$ACTUAL" "$BIN/clang++"
+            echo "[ndk-patch] ✅ linked clang -> $ACTUAL"
+          else
+            echo "[ndk-patch] clang 已存在，无需 patch"
+          fi
 
       - name: Export ANDROID_NDK
         if: matrix.platform == 'android' && (github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform))
