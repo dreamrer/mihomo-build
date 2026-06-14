@@ -1002,41 +1002,56 @@ jobs:
           # 为"已存在"跳过 patch（runs/27499847066 wrapper 仍报 clang missing
           # 的原因）。-e follow symlink，dangling 返 false → 走 patch 分支
           # 强制 ln -sf 覆盖。
+          # 诊断先打一次：看 NDK BIN 里到底有什么 clang / lld 系 binary，
+          # 失败时直接看到真实文件名而不是空猜。
+          echo "[ndk-patch] BIN dir: $BIN"
+          echo "[ndk-patch] === clang/lld 系 binary 实际清单 ==="
+          ls -la "$BIN" 2>/dev/null | grep -E "(clang|lld|llvm-)" | head -40 || true
+          echo "[ndk-patch] === end 清单 ==="
+
+          # patch_symlink stem [alias_fallback]
+          # 找 ${BIN}/${stem}：
+          #   - 存在且 target valid → 跳过
+          #   - 不存在 / dangling → 找 ${stem}-NUM，然后 ${stem}.NUM，最后 alias_fallback
           patch_symlink() {
-            local stem="$1"  # e.g. clang / clang++ / ld.lld / lld / lld-link
+            local stem="$1"
+            local alias_fb="${2:-}"   # 可选：LLVM 别名入口（如 lld）
             if [ -e "$BIN/$stem" ]; then
               echo "[ndk-patch] $stem 已存在（target valid），跳过"
               return 0
             fi
-            # 到这里说明：1) 不存在 2) 或者是 dangling symlink。先删了再补
             rm -f "$BIN/$stem"
-            # 找 ${stem}-NUM 形式（不要匹配到 ${stem}-other-thing）
-            # 注意：GH Actions bash 跑在 set -e -o pipefail 下，grep 无匹配会
-            # 返 1，pipefail 把 1 提到 pipeline → set -e 杀掉整步（run/27500810652
-            # 现场：clang/clang++ 成功后到 ld.lld 既无"跳过"也无"linked"直接 exit 1）。
-            # 用 subshell + || true 兜底：grep 无匹配时 actual 为空，下面 -z 分支接管。
+            # set -e -o pipefail 下 grep 无匹配返 1，会被 pipefail 提到管道杀步骤
+            # 用 subshell + || true 兜底
             local actual=$( (ls "$BIN" 2>/dev/null | grep -E "^${stem}-[0-9]+$" | head -1) || true )
             if [ -z "$actual" ]; then
-              # 找不到 versioned 也尝试找 ${stem}.something
               actual=$( (ls "$BIN" 2>/dev/null | grep -E "^${stem}\\.[0-9]+$" | head -1) || true )
             fi
+            if [ -z "$actual" ] && [ -n "$alias_fb" ] && [ -e "$BIN/$alias_fb" ]; then
+              # LLVM 约定：ld.lld / ld64.lld / lld-link / wasm-ld 都是 lld 的
+              # 别名入口（通过 argv[0] 路由），没有独立 versioned binary。
+              # clang++ 也是 clang 的别名入口。
+              actual="$alias_fb"
+              echo "[ndk-patch] $stem 用 LLVM 别名入口 → $alias_fb"
+            fi
             if [ -z "$actual" ]; then
-              # 不存在 versioned 形式很常见：ld.lld / lld 等可能本身就是终端 binary
-              # 而不是 wrapper symlink。clang/clang++ 是核心，必须 patch；其它工
-              # 具找不到只 warn，不杀步骤——后续 build 真缺会自然报错，能看真因。
-              echo "[ndk-patch] ⚠️  找不到 ${stem}-* binary，跳过（可能 NDK 自带终端 binary）"
+              echo "[ndk-patch] ⚠️  找不到 ${stem}-* / ${stem}.NUM / 别名 binary，跳过"
               return 0
             fi
             ln -sf "$actual" "$BIN/$stem"
             echo "[ndk-patch] ✅ linked $stem -> $actual"
           }
 
-          # LLVM 系工具一次性全 patch
-          patch_symlink clang
-          patch_symlink clang++
-          patch_symlink ld.lld
+          # 顺序很关键：lld 先 patch（让 ld.lld 等别名能 fallback 到它）
           patch_symlink lld
-          patch_symlink lld-link
+          # clang 也先 patch（让 clang++ 能 fallback）
+          patch_symlink clang
+          patch_symlink clang++ clang
+          # lld 别名入口（runs/27501260716 真错：clang 报 ld.lld 不存在）
+          patch_symlink ld.lld lld
+          patch_symlink ld64.lld lld
+          patch_symlink lld-link lld
+          patch_symlink wasm-ld lld
           patch_symlink llvm-ar
           patch_symlink llvm-ranlib
           patch_symlink llvm-strip
