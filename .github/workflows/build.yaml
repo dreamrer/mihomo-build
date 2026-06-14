@@ -962,8 +962,10 @@ jobs:
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
-          # 与 android/app/build.gradle.kts ndkVersion 必须精确匹配
-          ndk-version: r28
+          # 与 android/app/build.gradle.kts ndkVersion 严格匹配——之前用 r28
+          # 短码，setup-ndk 装的 wrapper 引用 `clang` 但找不到（runs/27492755820
+          # 失败原因），改用精确版本号绕开 broken wrapper。
+          ndk-version: 28.0.13004108
           local-cache: true
           add-to-path: false
 
