@@ -1584,15 +1584,18 @@ jobs:
           ln -s /Applications "$STAGING/Applications"
 
           # 简洁的拖拽安装说明（纯安装步骤，不解释证书 / 系统设置 / Gatekeeper）
-          cat > "$STAGING/安装步骤.txt" <<README
-${APP_NAME_NOAPP} 安装
-
-1. 把左边的 ${APP_NAME_BUNDLE} 拖到右边的 Applications 文件夹
-2. 打开 Launchpad（或前往应用程序文件夹）找到 ${APP_NAME_NOAPP}，双击启动
-3. 完成
-
-—— 如有问题请联系技术支持
-README
+          # 用 { echo; ... } 块而不是 heredoc——heredoc 内容必须顶格，会破坏
+          # YAML 缩进让整个 workflow 解析失败（GitHub 报 422 "Workflow does not
+          # have 'workflow_dispatch' trigger"）。
+          {
+            echo "${APP_NAME_NOAPP} 安装"
+            echo ""
+            echo "1. 把左边的 ${APP_NAME_BUNDLE} 拖到右边的 Applications 文件夹"
+            echo "2. 打开 Launchpad（或前往应用程序文件夹）找到 ${APP_NAME_NOAPP}，双击启动"
+            echo "3. 完成"
+            echo ""
+            echo "—— 如有问题请联系技术支持"
+          } > "$STAGING/安装步骤.txt"
 
           # 卷名用 ASCII 包名（DMG 卷名不能含 /，中文也可能在某些 fs 异常）
           VOLNAME="${APP_NAME_NOAPP}"
