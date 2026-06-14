@@ -970,28 +970,59 @@ jobs:
           local-cache: true
           add-to-path: false
 
-      # NDK r28 上游 release 的 wrapper script bug：
-      #   .../bin/armv7a-linux-androideabi21-clang: line 4:
-      #   .../bin/clang: No such file or directory
-      # 实际 bin 目录里有 clang-19 / clang-20 之类，但缺 `clang` 这个名字的
-      # symlink。手动 ln -sf 补上让 wrapper 能找到。
-      - name: Patch NDK r28 clang symlink (workaround broken wrapper)
+      # NDK r28 上游 release 整个 bin 目录的 versioned symlink 都缺：
+      #   .../bin/clang        ← 缺，只有 clang-19/20
+      #   .../bin/ld.lld       ← 缺（runs/27493315381 失败原因）
+      # 历次失败:
+      #   27492755820: clang missing
+      #   27492971975: 精确版本号 setup-ndk 返 404
+      #   27493315381: ld.lld missing
+      # 一次性扫所有 LLVM 系工具补 symlink，避免再被新缺失文件咬。
+      - name: Patch NDK r28 broken symlinks (workaround upstream release bug)
         if: matrix.platform == 'android' && (github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform))
         run: |
           NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
           BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          if [ ! -f "$BIN/clang" ]; then
-            ACTUAL=$(ls "$BIN"/clang-* 2>/dev/null | grep -E 'clang-[0-9]+$' | head -1 | xargs -n1 basename)
-            if [ -z "$ACTUAL" ]; then
-              echo "[ndk-patch] ❌ 找不到任何 clang-* binary"
-              ls -la "$BIN" | head -40
-              exit 1
+
+          # 通用 patch 函数：拿 versioned binary 补一个无后缀 symlink
+          # ${BIN}/clang -> clang-19；${BIN}/ld.lld -> ld.lld-19；etc.
+          patch_symlink() {
+            local stem="$1"  # e.g. clang / clang++ / ld.lld / lld / lld-link
+            if [ -f "$BIN/$stem" ] || [ -L "$BIN/$stem" ]; then
+              echo "[ndk-patch] $stem 已存在，跳过"
+              return 0
             fi
-            ln -sf "$ACTUAL" "$BIN/clang"
-            ln -sf "$ACTUAL" "$BIN/clang++"
-            echo "[ndk-patch] ✅ linked clang -> $ACTUAL"
-          else
-            echo "[ndk-patch] clang 已存在，无需 patch"
+            # 找 ${stem}-NUM 形式（不要匹配到 ${stem}-other-thing）
+            local actual=$(ls "$BIN" 2>/dev/null | grep -E "^${stem}-[0-9]+$" | head -1)
+            if [ -z "$actual" ]; then
+              # 找不到 versioned 也尝试找 ${stem}.something
+              actual=$(ls "$BIN" 2>/dev/null | grep -E "^${stem}\\.[0-9]+$" | head -1)
+            fi
+            if [ -z "$actual" ]; then
+              echo "[ndk-patch] ⚠️  找不到 ${stem}-* binary 用于 patch"
+              return 1
+            fi
+            ln -sf "$actual" "$BIN/$stem"
+            echo "[ndk-patch] ✅ linked $stem -> $actual"
+          }
+
+          # LLVM 系工具一次性全 patch
+          patch_symlink clang
+          patch_symlink clang++
+          patch_symlink ld.lld
+          patch_symlink lld
+          patch_symlink lld-link
+          patch_symlink llvm-ar
+          patch_symlink llvm-ranlib
+          patch_symlink llvm-strip
+          patch_symlink llvm-objcopy
+          patch_symlink llvm-objdump
+
+          # 验证：armv7a-linux-androideabi21-clang 这个 wrapper 现在能跑了吗
+          WRAPPER="$BIN/armv7a-linux-androideabi21-clang"
+          if [ -f "$WRAPPER" ]; then
+            echo "[ndk-patch] 测试 wrapper: $WRAPPER --version"
+            "$WRAPPER" --version || echo "[ndk-patch] ⚠️  wrapper 仍有问题"
           fi
 
       - name: Export ANDROID_NDK
