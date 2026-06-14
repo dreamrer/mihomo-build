@@ -932,12 +932,18 @@ jobs:
           echo "macOS icons regenerated from $SRC"
           ls -lh "$ICONSET"/*.png
 
-      # ── 5b. macOS：清除 SPM 构建缓存 ────────────────────────
-      - name: Clean macOS SPM cache
+      # ── 5b. macOS：清除 SPM 构建缓存 + Pods（v3.6.49 新增 pod cleanup）──
+      # SPM: 主仓库历史 SPM 集成残留
+      # Pods: pubspec 改动（v3.6.49 加 flutter_inappwebview）后 Podfile.lock
+      #       跟 sandbox 不同步，会报 "sandbox is not in sync with Podfile.lock"。
+      #       清掉 Podfile.lock + Pods 目录，让 flutter build 自动重新 pod install。
+      - name: Clean macOS SPM cache and Pods
         if: matrix.platform == 'macos'
         run: |
           rm -rf macos/Runner.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
           rm -rf macos/Runner.xcworkspace/xcshareddata/swiftpm/
+          rm -f  macos/Podfile.lock
+          rm -rf macos/Pods
 
       # ── 6. 安装 Go ───────────────────────────────────────────
       - name: Setup Go
