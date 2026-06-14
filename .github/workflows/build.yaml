@@ -1017,8 +1017,11 @@ jobs:
               actual=$(ls "$BIN" 2>/dev/null | grep -E "^${stem}\\.[0-9]+$" | head -1)
             fi
             if [ -z "$actual" ]; then
-              echo "[ndk-patch] ⚠️  找不到 ${stem}-* binary 用于 patch"
-              return 1
+              # 不存在 versioned 形式很常见：ld.lld / lld 等可能本身就是终端 binary
+              # 而不是 wrapper symlink。clang/clang++ 是核心，必须 patch；其它工
+              # 具找不到只 warn，不杀步骤——后续 build 真缺会自然报错，能看真因。
+              echo "[ndk-patch] ⚠️  找不到 ${stem}-* binary，跳过（可能 NDK 自带终端 binary）"
+              return 0
             fi
             ln -sf "$actual" "$BIN/$stem"
             echo "[ndk-patch] ✅ linked $stem -> $actual"
