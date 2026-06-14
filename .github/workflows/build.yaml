@@ -1464,16 +1464,21 @@ jobs:
             fi
           fi
 
-      # ── 12a-mac. macOS: ad-hoc 签名（未签名的 .app 在 macOS 10.15+ 无法打开）──
-      - name: Sign macOS app (ad-hoc)
+      # ── 12a-mac. macOS: ad-hoc 签名 + 打包成 PKG（v3.6.49 起，替代 DMG）──
+      #
+      # 改 DMG → PKG 的理由：
+      #   - .pkg 走 Installer.app 标准安装流程，用户感知"装"得更明确
+      #   - SmallRocket 等参考客户端用 .pkg
+      #   - 注：本质都需要 Apple Developer 签名+公证才能完全无感，这只是
+      #     UX 微调，不解决 Gatekeeper 问题
+      - name: Sign macOS app (ad-hoc) and pack PKG
         if: matrix.platform == 'macos'
         run: |
-          # flutter_distributor 产出 DMG 在 dist/ 下，需要从 DMG 提取 .app 签名后重新打包
-          # 但更简单的方式：直接签名 build 目录中的 .app，然后重新生成 DMG
+          # 优先从 build/ 目录拿 .app（最新最干净，刚 flutter build 出来）
           APP_DIR=$(find build/macos/Build/Products/Release -name "*.app" -type d 2>/dev/null | head -1)
           if [ -z "$APP_DIR" ]; then
             echo "[sign] ⚠️ No .app found in build output, trying dist/"
-            # 尝试从 dist/ 中的 DMG 挂载提取
+            # 兜底：从 flutter_distributor 产出的 DMG 提取
             DMG_FILE=$(find dist -name "*.dmg" 2>/dev/null | head -1)
             if [ -n "$DMG_FILE" ]; then
               echo "[sign] Found DMG: $DMG_FILE"
@@ -1488,11 +1493,11 @@ jobs:
               else
                 hdiutil detach "$MOUNT_DIR" -quiet
                 echo "[sign] ❌ No .app found in DMG"
-                exit 0
+                exit 1
               fi
             else
               echo "[sign] ❌ No DMG found in dist/"
-              exit 0
+              exit 1
             fi
           fi
 
@@ -1503,29 +1508,56 @@ jobs:
             codesign --force --deep --sign - "$fw" 2>/dev/null || true
           done
 
-          # 签名主 App（ad-hoc，与 FlClash 上游一致）
+          # 签名主 App（ad-hoc，与上游 FlClash 一致）
           codesign --force --deep --sign - "$APP_DIR"
           echo "[sign] ✅ Ad-hoc signed: $APP_DIR"
 
           # 验证签名
           codesign -v "$APP_DIR" && echo "[sign] ✓ Signature valid" || echo "[sign] ⚠️ Signature verification warning"
 
-          # 如果是从 DMG 提取的，需要重新打包 DMG
-          if [ -n "$DMG_FILE" ] && [ -n "$WORK_DIR" ]; then
-            APP_NAME_BUNDLE=$(basename "$APP_DIR")
-            echo "[sign] Repacking DMG with signed app..."
-            rm -f "$DMG_FILE"
-            # 用 hdiutil 创建新 DMG
-            STAGING=$(mktemp -d)
-            cp -R "$APP_DIR" "$STAGING/"
-            ln -s /Applications "$STAGING/Applications"
-            hdiutil create -volname "$(basename "$DMG_FILE" .dmg)" \
-              -srcfolder "$STAGING" \
-              -ov -format UDZO \
-              "$DMG_FILE"
-            rm -rf "$STAGING" "$WORK_DIR"
-            echo "[sign] ✅ DMG repacked: $DMG_FILE"
+          # ── 打包成 PKG ──
+          APP_NAME_BUNDLE=$(basename "$APP_DIR")        # 例: Apex.app / 小火箭.app
+          APP_NAME_NOAPP="${APP_NAME_BUNDLE%.app}"      # 例: Apex / 小火箭
+
+          # 从 Info.plist 读取 bundle id 和 version
+          BUNDLE_ID=$(plutil -extract CFBundleIdentifier raw -o - "$APP_DIR/Contents/Info.plist" 2>/dev/null || echo "com.apex.vpn")
+          VERSION=$(plutil -extract CFBundleShortVersionString raw -o - "$APP_DIR/Contents/Info.plist" 2>/dev/null || echo "1.0")
+
+          # PKG 输出文件名跟旧 DMG 类似（matrix.arch=universal）
+          mkdir -p dist
+          # 用 ASCII 包名（避免中文文件名在某些 fs 上的问题）
+          PKG_OUTPUT="dist/${APP_NAME_NOAPP}-${VERSION}-macos-universal.pkg"
+
+          # 删掉所有旧 DMG（v3.6.49 改 PKG，不再分发 DMG）
+          rm -f dist/*.dmg
+
+          # staging dir 只放签名后的 .app
+          STAGING=$(mktemp -d)
+          cp -R "$APP_DIR" "$STAGING/"
+
+          echo "[pkg] Building PKG..."
+          echo "[pkg]   App:         $APP_NAME_BUNDLE"
+          echo "[pkg]   Bundle ID:   $BUNDLE_ID"
+          echo "[pkg]   Version:     $VERSION"
+          echo "[pkg]   Output:      $PKG_OUTPUT"
+
+          pkgbuild \
+            --root "$STAGING" \
+            --identifier "$BUNDLE_ID" \
+            --version "$VERSION" \
+            --install-location /Applications \
+            "$PKG_OUTPUT"
+
+          rm -rf "$STAGING"
+
+          if [ -f "$PKG_OUTPUT" ]; then
+            echo "[pkg] ✅ PKG built: $PKG_OUTPUT ($(du -sh "$PKG_OUTPUT" | cut -f1))"
+          else
+            echo "[pkg] ❌ pkgbuild 产出文件不存在"
+            exit 1
           fi
+
+          ls -la dist/
 
       # ── 12b. 重命名输出文件（ASCII 包名 → 完整 App 名）──
       - name: Rename dist files
