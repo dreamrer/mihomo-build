@@ -1515,26 +1515,24 @@ jobs:
             fi
           fi
 
-      # ── 12a-mac. macOS: ad-hoc 签名 + 打包成 PKG（v3.6.49 起，替代 DMG）──
+      # ── 12a-mac. macOS: ad-hoc 签名 + 打包成 DMG ──
       #
-      # 改 DMG → PKG 的理由：
-      #   - .pkg 走 Installer.app 标准安装流程，用户感知"装"得更明确
-      #   - SmallRocket 等参考客户端用 .pkg
-      #   - 注：本质都需要 Apple Developer 签名+公证才能完全无感，这只是
-      #     UX 微调，不解决 Gatekeeper 问题
-      - name: Sign macOS app (ad-hoc) and pack PKG
+      # 用 hdiutil 直接打 DMG（已签名的 .app + /Applications symlink），用户
+      # 拖入 Applications 即可。本质上还是要去"设置"信任一下（ad-hoc 签名不
+      # 等于 Apple 公证），但 DMG 是 macOS 客户端最常见的分发形态。
+      - name: Sign macOS app (ad-hoc) and pack DMG
         if: matrix.platform == 'macos'
         run: |
           # 优先从 build/ 目录拿 .app（最新最干净，刚 flutter build 出来）
           APP_DIR=$(find build/macos/Build/Products/Release -name "*.app" -type d 2>/dev/null | head -1)
           if [ -z "$APP_DIR" ]; then
             echo "[sign] ⚠️ No .app found in build output, trying dist/"
-            # 兜底：从 flutter_distributor 产出的 DMG 提取
-            DMG_FILE=$(find dist -name "*.dmg" 2>/dev/null | head -1)
-            if [ -n "$DMG_FILE" ]; then
-              echo "[sign] Found DMG: $DMG_FILE"
+            # 兜底：从 flutter_distributor 产出的 DMG 提取（如果已有）
+            EXISTING_DMG=$(find dist -name "*.dmg" 2>/dev/null | head -1)
+            if [ -n "$EXISTING_DMG" ]; then
+              echo "[sign] Found existing DMG: $EXISTING_DMG"
               MOUNT_DIR=$(mktemp -d)
-              hdiutil attach "$DMG_FILE" -mountpoint "$MOUNT_DIR" -nobrowse -quiet
+              hdiutil attach "$EXISTING_DMG" -mountpoint "$MOUNT_DIR" -nobrowse -quiet
               APP_IN_DMG=$(find "$MOUNT_DIR" -name "*.app" -maxdepth 1 -type d | head -1)
               if [ -n "$APP_IN_DMG" ]; then
                 WORK_DIR=$(mktemp -d)
@@ -1547,7 +1545,7 @@ jobs:
                 exit 1
               fi
             else
-              echo "[sign] ❌ No DMG found in dist/"
+              echo "[sign] ❌ No .app and no DMG found"
               exit 1
             fi
           fi
@@ -1566,45 +1564,47 @@ jobs:
           # 验证签名
           codesign -v "$APP_DIR" && echo "[sign] ✓ Signature valid" || echo "[sign] ⚠️ Signature verification warning"
 
-          # ── 打包成 PKG ──
+          # ── 打包成 DMG ──
           APP_NAME_BUNDLE=$(basename "$APP_DIR")        # 例: Apex.app / 小火箭.app
           APP_NAME_NOAPP="${APP_NAME_BUNDLE%.app}"      # 例: Apex / 小火箭
 
-          # 从 Info.plist 读取 bundle id 和 version
-          BUNDLE_ID=$(plutil -extract CFBundleIdentifier raw -o - "$APP_DIR/Contents/Info.plist" 2>/dev/null || echo "com.apex.vpn")
+          # 从 Info.plist 读取 version 用于文件名
           VERSION=$(plutil -extract CFBundleShortVersionString raw -o - "$APP_DIR/Contents/Info.plist" 2>/dev/null || echo "1.0")
 
-          # PKG 输出文件名跟旧 DMG 类似（matrix.arch=universal）
+          # DMG 输出文件名（matrix.arch=universal）
           mkdir -p dist
-          # 用 ASCII 包名（避免中文文件名在某些 fs 上的问题）
-          PKG_OUTPUT="dist/${APP_NAME_NOAPP}-${VERSION}-macos-universal.pkg"
+          DMG_OUTPUT="dist/${APP_NAME_NOAPP}-${VERSION}-macos-universal.dmg"
 
-          # 删掉所有旧 DMG（v3.6.49 改 PKG，不再分发 DMG）
-          rm -f dist/*.dmg
+          # 清掉旧产物（flutter_distributor 可能已先产出一份未签名的 DMG/PKG）
+          rm -f dist/*.dmg dist/*.pkg
 
-          # staging dir 只放签名后的 .app
+          # staging：签名后的 .app + /Applications symlink（拖拽安装的视觉提示）
           STAGING=$(mktemp -d)
           cp -R "$APP_DIR" "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
 
-          echo "[pkg] Building PKG..."
-          echo "[pkg]   App:         $APP_NAME_BUNDLE"
-          echo "[pkg]   Bundle ID:   $BUNDLE_ID"
-          echo "[pkg]   Version:     $VERSION"
-          echo "[pkg]   Output:      $PKG_OUTPUT"
+          # 卷名用 ASCII 包名（DMG 卷名不能含 /，中文也可能在某些 fs 异常）
+          VOLNAME="${APP_NAME_NOAPP}"
 
-          pkgbuild \
-            --root "$STAGING" \
-            --identifier "$BUNDLE_ID" \
-            --version "$VERSION" \
-            --install-location /Applications \
-            "$PKG_OUTPUT"
+          echo "[dmg] Building DMG..."
+          echo "[dmg]   App:         $APP_NAME_BUNDLE"
+          echo "[dmg]   Version:     $VERSION"
+          echo "[dmg]   Volume name: $VOLNAME"
+          echo "[dmg]   Output:      $DMG_OUTPUT"
+
+          # UDZO = zlib 压缩，分发体积友好；-ov 覆盖已存在
+          hdiutil create \
+            -volname "$VOLNAME" \
+            -srcfolder "$STAGING" \
+            -ov -format UDZO \
+            "$DMG_OUTPUT"
 
           rm -rf "$STAGING"
 
-          if [ -f "$PKG_OUTPUT" ]; then
-            echo "[pkg] ✅ PKG built: $PKG_OUTPUT ($(du -sh "$PKG_OUTPUT" | cut -f1))"
+          if [ -f "$DMG_OUTPUT" ]; then
+            echo "[dmg] ✅ DMG built: $DMG_OUTPUT ($(du -sh "$DMG_OUTPUT" | cut -f1))"
           else
-            echo "[pkg] ❌ pkgbuild 产出文件不存在"
+            echo "[dmg] ❌ hdiutil 产出文件不存在"
             exit 1
           fi
 
