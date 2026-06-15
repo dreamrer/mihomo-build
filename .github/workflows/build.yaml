@@ -225,6 +225,31 @@ jobs:
           git config --global url."https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "git@github.com:"
           git config --global url."https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
 
+      # ── 0b. ubuntu-latest 磁盘清理: TV/linux build 把 14GB 装满会爆 ──────
+      # ubuntu-latest 预装的 .NET / Haskell / CodeQL / boost / Swift 等加起来 ~17GB,
+      # 全删放出 ~25GB. mihomo Go build cache + NDK r28 (5GB) + Android SDK 31 + Gradle
+      # cache 加起来很容易撑爆默认的 14GB free, 见 run 27546929826 TV 35min 跑到一半
+      # System.IO.IOException: No space left on device.
+      - name: Free disk space (ubuntu-latest)
+        if: runner.os == 'Linux'
+        run: |
+          echo "=== Before ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet         || true
+          sudo rm -rf /opt/ghc                  || true
+          sudo rm -rf /usr/local/.ghcup         || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /opt/hostedtoolcache/boost  || true
+          sudo rm -rf /opt/hostedtoolcache/PyPy   || true
+          sudo rm -rf /opt/microsoft            || true
+          # Android SDK 我们要用, 不删. 删 docker 缓存镜像.
+          docker rmi $(docker images -q) 2>/dev/null || true
+          # swap 占 4GB
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile /swapfile || true
+          echo "=== After ==="
+          df -h /
+
       # ── 1. 拉取私有源码 ─────────────────────────────────────
       - name: Checkout private source
         env:
