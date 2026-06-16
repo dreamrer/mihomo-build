@@ -1711,7 +1711,7 @@ jobs:
               delay 3
             end tell
           end tell
-APPLESCRIPT_END
+          APPLESCRIPT_END
 
           # 让 .DS_Store 写到镜像
           sync
