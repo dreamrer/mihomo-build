@@ -1783,6 +1783,50 @@ jobs:
         if: matrix.platform == 'windows'
         run: curl -fsSL --retry 3 --retry-delay 5 -o vc_redist.x64.exe "https://aka.ms/vs/17/release/vc_redist.x64.exe"
 
+      # ── 12c2. Windows: portable VC++ DLL 同捆 (工业级标准) ────
+      # 把 vcruntime140 / msvcp140 系列 dll 直接拷到 exe 同目录, Windows
+      # DLL 搜索顺序优先 exe 所在目录, 用户即使没装 VC++ Redistributable
+      # 也能直接双击 exe 启动. OBS/7-Zip/VSCode 同样做法.
+      #
+      # 跟 12c 互补: 12c 给走 Inno installer 路径的用户后台静默装系统 runtime
+      # (其他软件也能受益); 12c2 给直接拿 exe (portable / 解压版) 的用户兜底.
+      #
+      # 修 0xc0e90002 STATUS_SXS_CANT_GEN_ACTCTX "损坏的映像" 报错.
+      - name: Bundle portable VC++ runtime DLLs
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $releaseDir = "build\windows\x64\runner\Release"
+          if (-not (Test-Path $releaseDir)) {
+            Write-Host "::warning::Release dir not found at $releaseDir, looking elsewhere"
+            $releaseDir = (Get-ChildItem -Path build\windows -Filter Release -Recurse -Directory | Select-Object -First 1).FullName
+          }
+          if (-not (Test-Path $releaseDir)) {
+            Write-Host "::error::No Flutter Windows Release dir found, skipping VC++ DLL bundle"
+            exit 0
+          }
+          Write-Host "Bundling VC++ DLLs into: $releaseDir"
+          $dlls = @(
+            'vcruntime140.dll',
+            'vcruntime140_1.dll',
+            'msvcp140.dll',
+            'msvcp140_1.dll',
+            'msvcp140_2.dll',
+            'msvcp140_atomic_wait.dll',
+            'msvcp140_codecvt_ids.dll'
+          )
+          foreach ($dll in $dlls) {
+            $src = "C:\Windows\System32\$dll"
+            if (Test-Path $src) {
+              Copy-Item -Path $src -Destination $releaseDir -Force
+              Write-Host "  ✓ $dll"
+            } else {
+              Write-Host "  ⚠ $dll not found in System32 (可能此版本 VC++ 不需要, 安全跳过)"
+            }
+          }
+          Write-Host "Final Release dir contents:"
+          Get-ChildItem $releaseDir -Filter "*.dll" | Select-Object Name, Length | Format-Table
+
       # ── 12d. Windows: Inno Setup 打包 ────────────────────────
       - name: Build Windows installer (Inno Setup)
         if: matrix.platform == 'windows'
