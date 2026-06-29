@@ -105,9 +105,9 @@ class Apex extends ClashMeta
             }
 
             // [b] Hysteria2 obfs 平铺 — 修 hy2 节点用 salamander 混淆时超时
-            //     Xboard 现代 schema：
+            //     Xboard 现代 schema:
             //       protocol_settings.obfs = { open: true, type: 'salamander', password: 'xxx' }
-            //     老 fork ClashMeta 读：
+            //     老 fork ClashMeta 读:
             //       $server['obfs'] (type 字符串)
             //       $server['obfs_password'] 或 $server['obfs-password']
             //
@@ -115,11 +115,15 @@ class Apex extends ClashMeta
             //     $server['obfs_password'] (下划线) 再 emit 成中划线。两个都填,
             //     谁的 emit 风格都能命中。
             //
-            //     开关语义 (audit-fix):
-            //       - 有 `open` 字段 → 严格听 open 的 (开 = 平铺, 关 = 跳过,
-            //         哪怕 type/password 还在残留也不平铺, 避免面板 UI 关 obfs
-            //         但 type 字段没清空导致客户端强带 obfs 反握手失败)。
+            //     开关语义:
+            //       - 有 `open` 字段 → 严格听 open 的 (避免面板 UI 关 obfs 但
+            //         type 字段残留导致客户端强带 obfs 反握手失败)
             //       - 没 `open` 字段 (老 schema) → 看 type 是否有值
+            //
+            //     V2bX-mirror fallback (audit-fix, 见 patchHysteria2Yaml 大注释):
+            //       leaderen/V2bX 服务端 obfs.password 为空时把 obfs.type 字符串
+            //       当 password 用 (else if 分支)。客户端必须镜像同款行为, 否则
+            //       两端密码不匹配 → hy2 timeout。
             if (isset($s['protocol_settings']['obfs'])
                 && is_array($s['protocol_settings']['obfs'])) {
                 $obfs = $s['protocol_settings']['obfs'];
@@ -127,10 +131,16 @@ class Apex extends ClashMeta
                     ? !empty($obfs['open'])
                     : !empty($obfs['type']);
                 if ($isOn) {
+                    $type = (string) ($obfs['type'] ?? 'salamander');
                     if (empty($s['obfs'])) {
-                        $servers[$i]['obfs'] = (string) ($obfs['type'] ?? 'salamander');
+                        $servers[$i]['obfs'] = $type;
                     }
                     $pwd = (string) ($obfs['password'] ?? '');
+                    if ($pwd === '' && $type !== '') {
+                        // V2bX-mirror: 服务端走 fallback 用 type 当 password,
+                        // 客户端也用 type 字符串作 password 保持一致
+                        $pwd = $type;
+                    }
                     if ($pwd !== '') {
                         if (empty($s['obfs_password']))  { $servers[$i]['obfs_password']  = $pwd; }
                         if (empty($s['obfs-password']))  { $servers[$i]['obfs-password']  = $pwd; }
@@ -185,59 +195,106 @@ class Apex extends ClashMeta
     }
 
     /**
-     * 修补 Xboard ClashMeta::buildHysteria 在 yaml 输出阶段引入的两个 bug。
+     * 修补面板侧 emit + 节点后端 V2bX 多个 hy2 bug, 让客户端 yaml 跟节点后端
+     * 实际期望对齐。
      *
-     * 为什么不直接 override buildHysteria：
-     *   Xboard 父类 ClashMeta 用 `self::buildHysteria(...)` 分发协议（line 174
-     *   等位置），不是 `static::`。PHP 早期绑定意味着子类 override 永远不会被
-     *   parent::handle() 调用到。唯一干涉点就是 parent::handle() 返回之后、
-     *   encrypt() 之前，对 yaml 字符串做正则修补。
+     * 为什么不直接 override buildHysteria:
+     *   Xboard 父类 ClashMeta 用 `self::buildHysteria(...)` 分发协议 (line 174),
+     *   不是 `static::`。PHP 早期绑定意味着子类 override 永远不会被
+     *   parent::handle() 调用到。唯一干涉点是 parent::handle() 返回之后、
+     *   encrypt() 之前, 对 yaml 字符串做正则修补。
      *
-     * Bug 1: 'up' / 'down' 没单位
-     *   父类 line 597-598：
-     *     'up' => data_get($protocol_settings, 'bandwidth.up'),    // 比如 100
-     *     'down' => data_get($protocol_settings, 'bandwidth.down'), // 比如 500
-     *   →  yaml 输出 `up: 100` `down: 500`（raw int 没单位后缀）
-     *   →  mihomo StringToBps 解析失败 → brutal 拥塞控制不启用
-     *   →  实际表现：能连通，但速度跑不起来（hy2 节点的 brutal 是核心卖点）。
+     * Bug 1: 'up' / 'down' 没单位 (Xboard ClashMeta line 597-598)
+     *     'up' => data_get($protocol_settings, 'bandwidth.up')   // 比如 100
+     *   → yaml `up: 100` (raw int, 没 Mbps 单位)
+     *   → mihomo StringToBps 解析失败 → brutal 拥塞控制不启用 → 速度极慢
+     *   修法: 正则匹配纯数字 up/down 行, 补 ' Mbps' 后缀。
      *
-     *   修法：正则匹配仅有数字、无单位后缀的 up/down 行，补 ' Mbps' 后缀。
-     *   单位有就跳过（操作员手填 "100 mbit/s" 之类不动）。
+     * Bug 2+3: obfs / obfs-password 配对一致性
      *
-     * Bug 2: obfs/obfs-password 是 null (yaml 里的 `~`/`''`)
-     *   父类 line 621-624：
+     *   两端都有问题, 必须一起修:
+     *
+     *   面板侧 (Xboard ClashMeta line 621-624):
      *     if (data_get($protocol_settings, 'obfs.open')) {
-     *         $array['obfs'] = data_get($protocol_settings, 'obfs.type');           // 可能 null
-     *         $array['obfs-password'] = data_get($protocol_settings, 'obfs.password'); // 可能 null
+     *         $array['obfs'] = data_get('obfs.type');               // 可能 null
+     *         $array['obfs-password'] = data_get('obfs.password');  // 可能 null
      *     }
-     *   面板 UI 把 obfs 打开但没填 type/password（或前端清空过）时:
-     *   →  yaml 输出 `obfs: ~` 和 `obfs-password: ~`
-     *   →  mihomo 当 "obfs 启用但 type 异常" → QUIC 握手失败
-     *   →  实际表现：节点直接 timeout，是这次用户反馈的真凶之一。
+     *   面板 UI 关 obfs 但 type 字段残留, 或开 obfs 但 password 没填时,
+     *   yaml 出 `obfs: ~` / `obfs-password: ~`。
      *
-     *   修法：删除 obfs 值为 null/~/'' 的整行。让 mihomo 当作 obfs 未启用，
-     *   恢复明文 hy2，至少能用。
+     *   节点后端 leaderen/V2bX (core/sing/node.go line 369-382):
+     *     case "hysteria2":
+     *         if ObfsType != "" && ObfsPassword != "" {
+     *             obfs = {Type: ObfsType, Password: ObfsPassword}      // 正常
+     *         } else if ObfsType != "" {                                // ⚠️ bug
+     *             obfs = {Type: "salamander", Password: ObfsType}      // type 当 password
+     *         }
+     *   服务端面板返 obfs="salamander"/obfs-password="" 时, V2bX 实际跑
+     *   `obfs salamander, password="salamander"` (拿 type 字符串作密码), 而
+     *   客户端 yaml 按面板真实数据是 `obfs: salamander, obfs-password: null`,
+     *   mihomo 拿空 password 连 → 两端密码不匹配 → QUIC 握手 silent drop →
+     *   客户端 timeout。这是用户报 "hy2 节点 timeout" 的真凶。
      *
-     * 兼容性：
-     *   - v2board 父类 ClashMeta::buildHysteria2 (line 468-498) 不读 bandwidth，
-     *     所以 yaml 里本来就没 up/down，正则不命中无操作。
-     *   - 修补只影响异常行；正常完整字段（如 'up: 100 Mbps'）不动。
-     *   - obfs 删行也只删 null 值，正常 `obfs: salamander` 不动。
+     *   修法 (配对处理, 紧邻两行同时观察):
+     *     - obfs 空 + password 空 → 两行都删, mihomo 走 plain
+     *     - obfs 有 + password 空 → password = obfs 值 (镜像 V2bX fallback,
+     *                                让两端密码一致)
+     *     - obfs 空 + password 有 → 两行都删 (光有密码没类型, 没意义)
+     *     - obfs 有 + password 有 → 原样不动
+     *
+     *   配对正则: ClashMeta.php 父类 emit 时两行总是紧邻 (line 622-623),
+     *   多行模式抓 "前行 obfs: x\n紧跟 obfs-password: y\n" 一起处理。
+     *
+     *   清理: 配对正则没命中的孤立 null 行 (理论上不应出现, 防御性兜底)
+     *   也单独删掉。
+     *
+     * 兼容性:
+     *   - v2board 父类 ClashMeta::buildHysteria2 (line 468-498) 不读 bandwidth,
+     *     yaml 本来就没 up/down, Bug 1 正则不命中无操作。
+     *   - 配对正则只命中 obfs/obfs-password 紧邻成对的情形; 父类不动的前提下成立。
+     *   - 正常完整字段 ("up: 100 Mbps" / "obfs: salamander" + "obfs-password: xxx") 都不动。
      */
     private function patchHysteria2Yaml(string $yaml): string
     {
         // Bug 1: 给纯数字的 up/down 补 ' Mbps' 单位
-        //   匹配："  up: 100\n" 或 "  down: 500\n"（行首缩进 + key + 纯数字值）
-        //   不匹配："  up: 100 Mbps"、"  up: '100 Mbps'"、"  up: 100Mbit/s"
+        //   匹配 "  up: 100\n" 或 "  down: 500\n"（行首缩进 + key + 纯数字值）
+        //   不匹配 "  up: 100 Mbps"、"  up: '100 Mbps'"、"  up: 100Mbit/s"
         $yaml = preg_replace(
             '/^(\h*(?:up|down)):\s+(\d+)\s*$/m',
             '$1: $2 Mbps',
             $yaml
         );
 
-        // Bug 2: 删 obfs / obfs-password 是 null 的整行
-        //   匹配 yaml 的几种 null 写法: `~`、`null`、`''`、`""`、空值
-        //   m 模式让 ^/$ 配行边界，删整行（含结尾换行）。
+        // Bug 2+3: obfs / obfs-password 配对处理 (镜像 V2bX 的 fallback bug)
+        $isNullish = function ($v) {
+            $v = trim($v);
+            return $v === '' || $v === '~' || $v === 'null'
+                || $v === "''" || $v === '""';
+        };
+        $yaml = preg_replace_callback(
+            '/^(?P<indent>\h*)obfs:\h*(?P<vObfs>.*?)\h*\r?\n'
+            . '(?P=indent)obfs-password:\h*(?P<vPwd>.*?)\h*\r?\n/m',
+            function ($m) use ($isNullish) {
+                $obfsEmpty = $isNullish($m['vObfs']);
+                $pwdEmpty  = $isNullish($m['vPwd']);
+                if ($obfsEmpty && $pwdEmpty) {
+                    return ''; // 都空 → 整对删, mihomo plain
+                }
+                if ($obfsEmpty) {
+                    return ''; // 光有 password 没 type → 删 (mihomo 拒绝无 type 的 obfs)
+                }
+                if ($pwdEmpty) {
+                    // 镜像 V2bX 的 fallback: 把 obfs 类型字符串当 password 用
+                    return $m['indent'] . 'obfs: '          . $m['vObfs'] . "\n"
+                         . $m['indent'] . 'obfs-password: ' . $m['vObfs'] . "\n";
+                }
+                return $m[0]; // 都正常 → 原样
+            },
+            $yaml
+        );
+
+        // 防御性兜底: 配对正则没命中的孤立 null 行 (父类 emit 行为未来可能
+        // 变化, 这一步保证不会有 `obfs: ~` 类垃圾留在 yaml 里)
         $yaml = preg_replace(
             "/^\h*(?:obfs|obfs-password)\s*:\s*(?:~|null|''|\"\"|)\s*\r?\n/m",
             '',
