@@ -123,6 +123,16 @@ on:
         required: false
         default: ''
 
+      # ── 代理专用固定邀请码（烧录进包 + 双写 OSS）────────
+      # 非空 → APK 内所有新用户注册强制用这个码, 邀请码输入框预填 + 禁用编辑.
+      # 打包机器人**必须**把这个字段对普通授权用户设为**只读**, 不然授权用户
+      # 可以随意改成别人的邀请码给所有代理无限打包盗流量.
+      # 客户端读取顺序: dart-define > OSS contact.fixed_invite_code > 空.
+      fixed_invite_code:
+        description: '代理专用客户端固定邀请码（留空=用户手填注册；填了=APK 锁死走该代理）'
+        required: false
+        default: ''
+
       # ── 客服 & 联系方式（写入远程配置，不烧录进包）─────────
       telegram_channel:
         description: 'TG 订阅频道（如 https://t.me/jichangbiji，写入远程配置）'
@@ -1204,6 +1214,7 @@ jobs:
           PANEL_TYPE: ${{ inputs.panel_type || 'xboard' }}
           API_PREFIX: ${{ inputs.api_prefix || '/api/v1' }}
           DELAY_DISCOUNT: ${{ inputs.delay_discount }}
+          FIXED_INVITE_CODE: ${{ inputs.fixed_invite_code }}
           ANDROID_FLAVOR: ${{ matrix.flavor || '' }}
           # ↓ setup.dart::Build.mihomoTag 读这个，触发 mihomo 源码 patch + ldflags 注入
           MIHOMO_TAG: ${{ env.MIHOMO_TAG }}
@@ -1234,6 +1245,7 @@ jobs:
           PANEL_TYPE:  ${{ inputs.panel_type || 'xboard' }}
           API_PREFIX:  ${{ inputs.api_prefix || '/api/v1' }}
           DELAY_DISCOUNT: ${{ inputs.delay_discount }}
+          FIXED_INVITE_CODE: ${{ inputs.fixed_invite_code }}
           # iOS 也走 mihomo 字符串脱敏（虽然 Apple Store 没小米那种风控扫描，
           # 但侧载/TestFlight 检测工具同样看 binary 特征——一致性 + 防未来收紧）
           MIHOMO_TAG: ${{ env.MIHOMO_TAG }}
