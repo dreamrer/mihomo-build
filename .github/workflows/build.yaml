@@ -2080,6 +2080,11 @@ jobs:
           echo "version=$VER" >> $GITHUB_OUTPUT
 
       - name: Build all OpenWrt architectures
+        env:
+          # 与桌面/移动端同一套 inputs，保证同品牌 flag/key 一致
+          XOR_KEY:           ${{ inputs.xor_key }}
+          APEX_FLAG:         ${{ inputs.apex_flag || 'apex' }}
+          ENABLE_ENCRYPTION: ${{ inputs.enable_encryption || 'yes' }}
         run: |
           set -e
           VER="${{ steps.version.outputs.version }}"
@@ -2093,6 +2098,25 @@ jobs:
           LDFLAGS="-w -s -X 'github.com/metacubex/mihomo/constant.Version=$VER' -X 'github.com/metacubex/mihomo/constant.BuildTime=$BUILD_TIME'"
           CORE_DIR="core/Clash.Meta"
           mkdir -p dist
+
+          # ── 注入加密订阅参数到默认 uci 配置（路由用户零配置）──────────
+          # 加密开启且 xor_key 非空 → 注入 key；否则明文（不注入 key，
+          # init.d 里只有配了 xor_key 才会请求 flag=apex）。apex_flag 始终写入。
+          # awk+ENVIRON 读值：key 含 / & \ 等特殊字符也安全，不用 sed。
+          CFG="openwrt/etc/config/mihomo"
+          if [ "$ENABLE_ENCRYPTION" = "yes" ] && [ -n "$XOR_KEY" ]; then
+            INJ_KEY="$XOR_KEY"
+          else
+            INJ_KEY=""
+          fi
+          XOR_KEY="$INJ_KEY" APEX_FLAG="${APEX_FLAG:-apex}" awk -v q="'" '
+            BEGIN { k=ENVIRON["XOR_KEY"]; f=ENVIRON["APEX_FLAG"] }
+            /option xor_key /  && k!="" { print "\toption xor_key "  q k q; next }
+            /option apex_flag / && f!="" { print "\toption apex_flag " q f q; next }
+            { print }
+          ' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
+          # 只报 set/empty，不打印 key 本身
+          echo "openwrt config injected: xor_key=$([ -n "$INJ_KEY" ] && echo set || echo empty) apex_flag=${APEX_FLAG:-apex}"
 
           # OpenWrt ipk 架构命名（与 opkg 架构一致）
           # https://openwrt.org/docs/techref/instructionset
