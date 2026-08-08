@@ -1110,6 +1110,28 @@ jobs:
           echo "ANDROID_NDK_ROOT=$NDK_PATH" >> "$GITHUB_ENV"
           echo "[setup-ndk] ANDROID_NDK=$NDK_PATH"
 
+      # ── 6c2. Android: JDK(gomobile bind 出 .aar 的 Java 部分需 javac,pin temurin 17
+      #         与 build-android-core.yml 一致,不靠 runner 预装的不确定版本)──
+      - name: Setup JDK (android)
+        if: matrix.platform == 'android' && (github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform))
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ── 6d. Android: 安装 gomobile ───────────────────────────
+      # 剥离 FlClash 后,安卓核不再是 setup.dart 直接 cc 编 libclash.so,而是
+      # build-android-core.sh 用 `gomobile bind` 出 android/app/libs/mihomo.aar。
+      # runner 不预装 gomobile → 不装则 `gomobile: command not found`,android 腿必挂。
+      - name: Install gomobile (android)
+        if: matrix.platform == 'android' && (github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform))
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          gomobile init
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       # ── 7. 安装 Flutter ──────────────────────────────────────
       - name: Setup Flutter
         if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
@@ -1761,7 +1783,32 @@ jobs:
           [ -z "$PKG_NAME" ] && PKG_NAME="mihomo"
           echo "APP_NAME=$APP_NAME  PKG_NAME=$PKG_NAME"
           LDFLAGS="-w -s -X 'github.com/metacubex/mihomo/constant.Version=$VER' -X 'github.com/metacubex/mihomo/constant.BuildTime=$BUILD_TIME'"
-          CORE_DIR="core/Clash.Meta"
+          # 内核源:剥离 FlClash 后 core/Clash.Meta 子模块已删,改克隆官方 mihomo
+          # (与客户端 openwrt/build.sh、build-mihomo.sh 同一策略)。
+          MIHOMO_VERSION="v1.19.29"
+          CORE_DIR="/tmp/mihomo-src"
+          if [ ! -f "$CORE_DIR/go.mod" ]; then
+            echo "=== 克隆官方 mihomo $MIHOMO_VERSION ==="
+            rm -rf "$CORE_DIR"
+            git clone --depth 1 --branch "$MIHOMO_VERSION" \
+              https://github.com/MetaCubeX/mihomo.git "$CORE_DIR"
+          fi
+          # 内置 metacubexd 控制台(打包时下好,离线可用,避免 CN 环境代理未起时
+          # 运行时从 GitHub 下载面板的鸡生蛋问题;init.d 运行时下载保留为回退)。
+          UI_SRC="/tmp/mihomo-ui"
+          if [ ! -f "$UI_SRC/index.html" ]; then
+            echo "=== 下载 metacubexd 控制台 ==="
+            rm -rf "$UI_SRC"; mkdir -p "$UI_SRC"
+            curl -sL --connect-timeout 15 --max-time 120 \
+              "https://github.com/MetaCubeX/metacubexd/releases/latest/download/compressed-dist.tgz" \
+              | tar xz -C "$UI_SRC" 2>/dev/null || true
+            if [ ! -f "$UI_SRC/index.html" ]; then
+              sub=$(ls -d "$UI_SRC"/*/ 2>/dev/null | head -1)
+              [ -n "$sub" ] && mv "$sub"* "$UI_SRC/" 2>/dev/null || true
+            fi
+            [ -f "$UI_SRC/index.html" ] && echo "  metacubexd OK" \
+              || echo "  ⚠️ metacubexd 下载失败,退回运行时下载"
+          fi
           mkdir -p dist
 
           # ── 注入加密订阅参数到默认 uci 配置（路由用户零配置）──────────
@@ -1807,7 +1854,7 @@ jobs:
               go build -C "$CORE_DIR" -tags="with_gvisor" -trimpath -ldflags="$LDFLAGS" -o "/tmp/mihomo-$arch"
 
             local pkg="/tmp/pkg-$arch"
-            mkdir -p "$pkg/usr/bin" "$pkg/etc/init.d" "$pkg/etc/config" "$pkg/etc/mihomo" "$pkg/etc/uci-defaults"
+            mkdir -p "$pkg/usr/bin" "$pkg/etc/init.d" "$pkg/etc/config" "$pkg/etc/mihomo" "$pkg/etc/mihomo/ui" "$pkg/etc/uci-defaults"
 
             cp "/tmp/mihomo-$arch" "$pkg/usr/bin/mihomo"
             chmod 755 "$pkg/usr/bin/mihomo"
@@ -1817,6 +1864,10 @@ jobs:
             cp openwrt/etc/mihomo/config.yaml "$pkg/etc/mihomo/config.yaml"
             cp openwrt/etc/uci-defaults/99-mihomo "$pkg/etc/uci-defaults/99-mihomo"
             chmod 755 "$pkg/etc/uci-defaults/99-mihomo"
+            # 内置 metacubexd 控制台(离线可用)
+            if [ -f "$UI_SRC/index.html" ]; then
+              cp -r "$UI_SRC/." "$pkg/etc/mihomo/ui/"
+            fi
 
             # ── 打 .ipk（OpenWrt 传统格式：gzipped tar 套两层 tar.gz，非 deb 的 ar 归档）──
             local ctl="/tmp/ctl-$arch"
