@@ -36,6 +36,10 @@ on:
         description: 'App 显示名称（留空=不修改）'
         required: false
         default: ''
+      app_name_en:
+        description: '英文名（HTTP User-Agent / 订阅 UA 用，ASCII，留空=Apex）'
+        required: false
+        default: ''
       app_logo_url:
         description: 'App Logo URL（PNG，建议 1024x1024，留空=不修改）'
         required: false
@@ -133,23 +137,9 @@ on:
         required: false
         default: ''
 
-      # ── 客服 & 联系方式（写入远程配置，不烧录进包）─────────
-      telegram_channel:
-        description: 'TG 订阅频道（如 https://t.me/jichangbiji，写入远程配置）'
-        required: false
-        default: ''
-      crisp_id:
-        description: 'Crisp 客服 ID（留空=不启用）'
-        required: false
-        default: ''
-      crisp_proxy_url:
-        description: 'Crisp 反代域名（解决国内卡顿，留空=用默认 go.crisp.chat）'
-        required: false
-        default: ''
-      salesmartly_token:
-        description: 'Salesmartly 客服 Token（留空=不启用，优先于 Crisp）'
-        required: false
-        default: ''
+      # 客服 & 联系方式(telegram_channel/crisp_id/crisp_proxy_url/salesmartly_token)
+      # 已移除:它们只走 OSS 远程配置(bot 的「生成加密配置」写进 contact,App 运行时
+      # 拉取),CI 不消费、不烧录进包。作为 CI input 是白传死参,故不再声明。
 
       # ── 构建完成通知 ────────────────────────────────────────
       notify_chat_id:
@@ -1221,6 +1211,7 @@ jobs:
           contains(inputs.platforms, matrix.platform)
         env:
           APP_NAME:   ${{ inputs.app_name }}
+          APP_NAME_EN: ${{ inputs.app_name_en }}
           XOR_KEY:    ${{ inputs.xor_key }}
           APEX_FLAG:  ${{ inputs.apex_flag || 'apex' }}
           ENABLE_ENCRYPTION: ${{ inputs.enable_encryption || 'yes' }}
