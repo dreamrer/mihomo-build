@@ -1304,8 +1304,10 @@ jobs:
           mkdir -p dist
           DMG_OUTPUT="dist/${APP_NAME_NOAPP}-${VERSION}-macos-universal.dmg"
 
-          # 清掉旧产物（flutter_distributor 可能已先产出一份未签名的 DMG/PKG）
-          rm -f dist/*.dmg dist/*.pkg
+          # 清掉旧产物（flutter_distributor 可能已先产出一份未签名的 DMG/PKG）。
+          # 同时删掉 flutter_distributor 顺带产出的 .zip：macOS 只发 DMG，不发 zip
+          # （.app 来自 build/ 目录，不依赖这个 zip，删了安全）。
+          rm -f dist/*.dmg dist/*.pkg dist/*.zip
 
           # staging：签名后的 .app + /Applications symlink（拖拽安装的视觉提示）
           STAGING=$(mktemp -d)
