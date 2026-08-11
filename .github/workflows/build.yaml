@@ -1179,7 +1179,7 @@ jobs:
       - name: Generate SDK code
         if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
         run: |
-          cd lib/sdk/flutter_xboard_sdk
+          cd lib/sdk/boardsdk
           flutter pub get
           dart run build_runner build --delete-conflicting-outputs
           cd ../../..
