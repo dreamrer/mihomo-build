@@ -147,6 +147,18 @@ on:
         required: false
         default: ''
 
+      # Bot 生成的一次性关联标识（uuid）。workflow_dispatch API 不回 run_id，
+      # Bot 靠它把 dispatch 精确认领到对应 run（见下方 run-name）。多个用户
+      # 几乎同时打包时，避免按时间窗抢错别人的 run。push 触发时为空。
+      build_token:
+        description: '一次性关联标识（Bot 内部使用，手动触发可留空）'
+        required: false
+        default: ''
+
+# run 显示名 = build_token，Bot 用 GET runs 列表按 name 精确认领本次 dispatch。
+# 留空（push / 手动无 token）时回退到普通名，不与 Bot 的 uuid 冲突。
+run-name: ${{ inputs.build_token != '' && inputs.build_token || format('Build {0}', github.ref_name) }}
+
 env:
   PRIVATE_REF: ${{ github.event_name == 'push' && github.ref_name || inputs.ref }}
   IS_STABLE: ${{ github.event_name == 'push' && !contains(github.ref, '-') || github.event_name != 'push' && !contains(inputs.ref, '-') }}
