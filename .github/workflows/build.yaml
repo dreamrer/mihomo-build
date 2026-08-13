@@ -1773,7 +1773,11 @@ jobs:
       - name: Get version
         id: version
         run: |
-          VER=$(grep -oP 'version:\s*\K[\d.]+' pubspec.yaml || echo "0.0.0")
+          # 与桌面/移动端同源:优先用机器人设的 app_version(inputs),空时才回退
+          # pubspec.yaml。此前只读 pubspec → OpenWrt 产物版本(4.0.2)和 app 版本
+          # (机器人设的 3.7.6)对不上。
+          VER="${{ inputs.app_version }}"
+          [ -z "$VER" ] && VER=$(grep -oP 'version:\s*\K[\d.]+' pubspec.yaml || echo "0.0.0")
           echo "version=$VER" >> $GITHUB_OUTPUT
 
       - name: Build all OpenWrt architectures
