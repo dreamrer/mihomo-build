@@ -1365,7 +1365,7 @@ jobs:
           fi
           codesign --force --deep --sign - --entitlements "$SIGN_ENT" "$APP_DIR"
           echo "[sign] ✅ Ad-hoc signed with entitlements: $APP_DIR"
-          echo "[sign] entitlements:"; codesign -d --entitlements :- "$APP_DIR" 2>/dev/null | tr -d '\0' | head -c 800; echo
+          echo "[sign] entitlements:"; codesign -d --entitlements :- "$APP_DIR" 2>/dev/null | tr -d '\0' || true; echo
 
           # 验证签名
           codesign -v "$APP_DIR" && echo "[sign] ✓ Signature valid" || echo "[sign] ⚠️ Signature verification warning"
