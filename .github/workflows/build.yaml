@@ -1621,12 +1621,12 @@ jobs:
             echo "[installer] update_installer.iss not found, skipping"
           fi
 
-      # ── 12e. Windows: 只发安装包,移除便携 zip ────────────────
-      # 便携 zip 由 flutter_distributor 在 Build 步产出,但它早于 12c2 的 VC++
-      # DLL 同捆 → zip 里不含运行库,干净系统(无 VC++ Redistributable)上解压
-      # 即撞 0xc0e90002「损坏的映像」。与其发这种半残便携包,不如只发自带
-      # vc_redist + 同捆 DLL 的 Inno 安装包。zip 那步仍保留:它顺带触发
-      # flutter build windows 产出 Release/,Inno 打包要用。
+      # ── 12e. Windows: 只发安装包,移除便携 zip(安全网)──────────
+      # 现在 setup.dart 的 windows 分支直接 flutter build,不再产便携 zip,
+      # 所以对新 tag 这步是无害空操作。但**旧 tag**(setup.dart 还走
+      # flutter_distributor --targets zip 的版本)构建时仍会产出 zip,而它
+      # 早于 12c2 的 VC++ DLL 同捆 → 不含运行库,干净系统解压即撞 0xc0e90002。
+      # 保留此步兜旧 ref:统一只发自带 vc_redist + 同捆 DLL 的 Inno 安装包。
       - name: Drop Windows portable zip (ship installer only)
         if: matrix.platform == 'windows'
         run: rm -f dist/*.zip
