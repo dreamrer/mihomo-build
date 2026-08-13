@@ -1338,8 +1338,34 @@ jobs:
           done
 
           # 签名主 App（ad-hoc，与上游 FlClash 一致）
-          codesign --force --deep --sign - "$APP_DIR"
-          echo "[sign] ✅ Ad-hoc signed: $APP_DIR"
+          # ⚠️ 必须带 --entitlements!ad-hoc 与 entitlements 不冲突（无需证书，可携带
+          # network / keychain-access-groups）。此前 `--sign -` 不带 --entitlements →
+          # 这步 --force 重签把 Xcode 应用的 Release.entitlements 全抹空 → 出厂包
+          # entitlements 为空 → flutter_secure_storage 写 Keychain 抛 -34018
+          # (errSecMissingEntitlement)，macOS 登录/加密受影响。
+          # keychain-access-groups 用本包 BUNDLE_ID（brand 相关，CI 期注入，不硬编码）。
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_DIR/Contents/Info.plist" 2>/dev/null || echo "")
+          SIGN_ENT="${RUNNER_TEMP:-/tmp}/sign.entitlements"
+          if [ -f macos/Runner/Release.entitlements ]; then
+            cp macos/Runner/Release.entitlements "$SIGN_ENT"
+          else
+            printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+              '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+              '<plist version="1.0"><dict>' \
+              '<key>com.apple.security.network.client</key><true/>' \
+              '<key>com.apple.security.network.server</key><true/>' \
+              '<key>com.apple.security.cs.allow-jit</key><true/>' \
+              '<key>com.apple.security.cs.disable-library-validation</key><true/>' \
+              '</dict></plist>' > "$SIGN_ENT"
+          fi
+          /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" "$SIGN_ENT" 2>/dev/null || true
+          if [ -n "$BUNDLE_ID" ]; then
+            /usr/libexec/PlistBuddy -c "Add :keychain-access-groups array" "$SIGN_ENT"
+            /usr/libexec/PlistBuddy -c "Add :keychain-access-groups:0 string $BUNDLE_ID" "$SIGN_ENT"
+          fi
+          codesign --force --deep --sign - --entitlements "$SIGN_ENT" "$APP_DIR"
+          echo "[sign] ✅ Ad-hoc signed with entitlements: $APP_DIR"
+          echo "[sign] entitlements:"; codesign -d --entitlements :- "$APP_DIR" 2>/dev/null | tr -d '\0' | head -c 800; echo
 
           # 验证签名
           codesign -v "$APP_DIR" && echo "[sign] ✓ Signature valid" || echo "[sign] ⚠️ Signature verification warning"
