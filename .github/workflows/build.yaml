@@ -71,7 +71,7 @@ on:
         required: false
         default: 'xboard'
       api_prefix:
-        description: 'API 路径前缀（默认 /api/v1，PPanel 用 /v1）'
+        description: 'API 路径前缀（默认 /api/v1）'
         required: false
         default: '/api/v1'
 
@@ -1139,6 +1139,11 @@ jobs:
         if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
         uses: subosito/flutter-action@v2
         with:
+          # 锁定版本,勿改回浮动 stable:3.47.0 的新 Dart 会产出 dot-shorthand
+          # AST 节点,旧 analyzer/freezed 的 ThrowingAstVisitor 缺
+          # visitDotShorthandPropertyAccess 实现 → boardsdk 代码生成崩溃;
+          # macOS 侧同版本还会导致 pod FlutterMacOS 版本不兼容。3.44.9 全绿。
+          flutter-version: '3.44.9'
           channel: 'stable'
           cache: true
 
@@ -1920,7 +1925,7 @@ jobs:
           echo "=== Building luci-app-mihomo (all) ==="
           luci_pkg="/tmp/pkg-luci"
           mkdir -p "$luci_pkg"
-          cp -r openwrt-luci/luci-app-mihomo/files/. "$luci_pkg/"
+          cp -r openwrt/luci-app-mihomo/files/. "$luci_pkg/"
           find "$luci_pkg" -type f -name "*.lua"        -exec chmod 644 {} \;
           find "$luci_pkg" -type f -name "*.htm"        -exec chmod 644 {} \;
           find "$luci_pkg" -type f -name "*.json"       -exec chmod 644 {} \;
