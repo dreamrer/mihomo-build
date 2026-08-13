@@ -1413,74 +1413,41 @@ jobs:
           # 卷名（中文 OK——macOS 用 HFS+/APFS 支持 UTF-8 卷名）
           VOLNAME="${APP_NAME_NOAPP}"
 
-          echo "[dmg] Building DMG..."
+          echo "[dmg] Building DMG via appdmg..."
           echo "[dmg]   App:         $APP_NAME_BUNDLE"
           echo "[dmg]   Version:     $VERSION"
           echo "[dmg]   Volume name: $VOLNAME"
           echo "[dmg]   Output:      $DMG_OUTPUT"
 
-          # ── 两阶段构建：先 UDRW (可读写) 用 AppleScript 设置 .DS_Store, 再 convert UDZO ──
-          # 这是工业级 DMG (Notion / Slack 同款) 的标准做法:
-          #   1. UDRW 临时镜像 → 挂载 → AppleScript 改窗口外观/图标位置 → detach
-          #   2. convert 成 UDZO 压缩镜像作为最终产物
-          DMG_TMP="$(mktemp -d)/staging.dmg"
-          hdiutil create -volname "$VOLNAME" -srcfolder "$STAGING" \
-            -ov -format UDRW -fs HFS+ -fsargs "-c c=64,a=16,e=16" \
-            "$DMG_TMP"
+          # ── appdmg：JSON 规格**直接写 .DS_Store**,不依赖 Finder ──────────
+          # 老方案(hdiutil UDRW + osascript 设图标位置)在 GitHub 无头 runner 上
+          # Finder 不可用 → AppleScript 每次失败(日志: "AppleScript 失败,退回
+          # 默认布局")→ DMG 用默认小窗口+工具栏 → 3 个图标塞不下被截断。appdmg
+          # 是 headless 确定性布局的业界做法(Electron 等 CI 通用)。
+          # 用 { printf; } > file 写规格(本 workflow 已证 heredoc 会破坏 YAML)。
+          SPEC="$(mktemp -d)/appdmg.json"
+          {
+            printf '{\n'
+            printf '  "title": "%s",\n' "$VOLNAME"
+            printf '  "icon-size": 128,\n'
+            printf '  "window": { "size": { "width": 600, "height": 460 } },\n'
+            printf '  "contents": [\n'
+            printf '    { "x": 300, "y": 120, "type": "file", "path": "%s/安装教程.txt" },\n' "$STAGING"
+            printf '    { "x": 165, "y": 300, "type": "file", "path": "%s/%s" },\n' "$STAGING" "$APP_NAME_BUNDLE"
+            printf '    { "x": 435, "y": 300, "type": "link", "path": "/Applications" }\n'
+            printf '  ]\n'
+            printf '}\n'
+          } > "$SPEC"
 
-          MOUNT_OUT=$(hdiutil attach "$DMG_TMP" -readwrite -noverify -noautoopen)
-          MOUNT_POINT=$(echo "$MOUNT_OUT" | tail -1 | awk '{for(i=3;i<=NF;i++) printf "%s ", $i; print ""}' | sed 's/[[:space:]]*$//')
-          echo "[dmg] mounted RW at: $MOUNT_POINT"
-
-          # 给 Finder 几秒注册卷
-          sleep 2
-
-          # AppleScript 写 .DS_Store: 窗口 600x450, 隐藏侧栏/工具栏,
-          # 教程.txt 顶部居中, .app 左 / Applications 右 对称.
-          # 失败不让整个 build 挂——退回默认布局.
-          osascript <<APPLESCRIPT_END || echo "[dmg] ⚠️ AppleScript 失败 (CI Finder 不可用?), 退回默认布局"
-          tell application "Finder"
-            tell disk "${VOLNAME}"
-              open
-              set current view of container window to icon view
-              set toolbar visible of container window to false
-              set statusbar visible of container window to false
-              set the bounds of container window to {200, 200, 800, 650}
-              set viewOptions to the icon view options of container window
-              set arrangement of viewOptions to not arranged
-              set icon size of viewOptions to 128
-              set text size of viewOptions to 14
-              set background color of viewOptions to {65535, 65535, 65535}
-              try
-                set position of item "安装教程.txt" of container window to {300, 100}
-              end try
-              try
-                set position of item "${APP_NAME_BUNDLE}" of container window to {180, 280}
-              end try
-              try
-                set position of item "Applications" of container window to {420, 280}
-              end try
-              close
-              open
-              update without registering applications
-              delay 3
-            end tell
-          end tell
-          APPLESCRIPT_END
-
-          # 让 .DS_Store 写到镜像
-          sync
-          sleep 1
-
-          # 卸载
-          hdiutil detach "$MOUNT_POINT" || hdiutil detach "$MOUNT_POINT" -force
-
-          # 转换为分发用的 UDZO (zlib 压缩)
           rm -f "$DMG_OUTPUT"
-          hdiutil convert "$DMG_TMP" -format UDZO -imagekey zlib-level=9 \
-            -o "$DMG_OUTPUT"
+          if npm install -g appdmg >/dev/null 2>&1 && appdmg "$SPEC" "$DMG_OUTPUT"; then
+            echo "[dmg] ✅ appdmg 布局成功"
+          else
+            echo "[dmg] ⚠️ appdmg 不可用,退回 hdiutil(保证出包,布局默认)"
+            hdiutil create -volname "$VOLNAME" -srcfolder "$STAGING" \
+              -ov -format UDZO -imagekey zlib-level=9 "$DMG_OUTPUT"
+          fi
 
-          rm -f "$DMG_TMP"
           rm -rf "$STAGING"
 
           if [ -f "$DMG_OUTPUT" ]; then
