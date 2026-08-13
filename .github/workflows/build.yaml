@@ -1147,7 +1147,12 @@ jobs:
           channel: 'stable'
           cache: true
 
-      # ── 8. Windows: 安装 flutter_distributor ─────────────────
+      # ── 8. Windows: 安装 flutter_distributor(仅旧 ref 需要)──────
+      # 新版 setup.dart 的 windows 分支直接 flutter build,不再用 distributor,
+      # 这步对新 tag 是多余的。但**旧 tag**(windows 还走 flutter_distributor
+      # --targets zip 的版本)构建时,setup.dart 裸调 `flutter_distributor`
+      # 靠 PATH 找它,而 Windows 上 pub global bin 默认不在 PATH → 必须靠这步
+      # 把 %LOCALAPPDATA%\Pub\Cache\bin 补进 PATH。保留以兜旧 ref 构建。
       - name: Setup flutter_distributor (Windows)
         if: matrix.platform == 'windows'
         run: |
