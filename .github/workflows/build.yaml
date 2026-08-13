@@ -1537,16 +1537,18 @@ jobs:
           # Win11 内置，但 Win10 LTSC/N/老版本无 → 客服/公告页(flutter_inappwebview)白屏。
           curl -fsSL --retry 3 --retry-delay 5 -o MicrosoftEdgeWebview2Setup.exe "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 
-      # ── 12c2. Windows: portable VC++ DLL 同捆 (工业级标准) ────
+      # ── 12c2. Windows: VC++ DLL 同捆到 Release (工业级标准) ────
       # 把 vcruntime140 / msvcp140 系列 dll 直接拷到 exe 同目录, Windows
       # DLL 搜索顺序优先 exe 所在目录, 用户即使没装 VC++ Redistributable
       # 也能直接双击 exe 启动. OBS/7-Zip/VSCode 同样做法.
       #
-      # 跟 12c 互补: 12c 给走 Inno installer 路径的用户后台静默装系统 runtime
-      # (其他软件也能受益); 12c2 给直接拿 exe (portable / 解压版) 的用户兜底.
+      # 跟 12c 互补(双保险): 12c 让 Inno 安装包后台静默装系统 runtime
+      # (其他软件也能受益); 12c2 把 DLL 同捆进 Release/ → Inno 打进安装包,
+      # 装好的 exe 同目录就有运行库, 即使 vc_redist 静默装失败也能起.
+      # (注: 便携 zip 已在 12e 停发, 因为它早于本步压包, 带不到这些 DLL.)
       #
       # 修 0xc0e90002 STATUS_SXS_CANT_GEN_ACTCTX "损坏的映像" 报错.
-      - name: Bundle portable VC++ runtime DLLs
+      - name: Bundle VC++ runtime DLLs into Release
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
@@ -1618,6 +1620,16 @@ jobs:
           else
             echo "[installer] update_installer.iss not found, skipping"
           fi
+
+      # ── 12e. Windows: 只发安装包,移除便携 zip ────────────────
+      # 便携 zip 由 flutter_distributor 在 Build 步产出,但它早于 12c2 的 VC++
+      # DLL 同捆 → zip 里不含运行库,干净系统(无 VC++ Redistributable)上解压
+      # 即撞 0xc0e90002「损坏的映像」。与其发这种半残便携包,不如只发自带
+      # vc_redist + 同捆 DLL 的 Inno 安装包。zip 那步仍保留:它顺带触发
+      # flutter build windows 产出 Release/,Inno 打包要用。
+      - name: Drop Windows portable zip (ship installer only)
+        if: matrix.platform == 'windows'
+        run: rm -f dist/*.zip
 
       # ── 13. 构建结果诊断 ──────────────────────────────────────
       - name: Debug dist output
