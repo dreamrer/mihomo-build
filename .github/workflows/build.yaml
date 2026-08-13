@@ -1220,6 +1220,25 @@ jobs:
           fi
           echo "MIHOMO_TAG=$TAG" >> "$GITHUB_ENV"
 
+      # ── 11b. Android: Gradle 依赖缓存 ─────────────────────────
+      # 缓存 ~/.gradle 的插件/依赖(Kotlin gradle plugin、AGP 等)。下过一次后
+      # 续 run 直接命中缓存,不再每次现拉 Maven Central / plugins.gradle.org,
+      # 挡掉 "Could not GET ...maven.apache.org" 那类网络抖动导致的偶发失败。
+      - name: Cache Gradle
+        if: |
+          matrix.platform == 'android' &&
+          (github.event_name == 'push' ||
+           inputs.platforms == '' ||
+           contains(inputs.platforms, matrix.platform))
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
       # ── 12. 编译构建 ──────────────────────────────────────────
       - name: Build
         if: |
@@ -1245,9 +1264,31 @@ jobs:
           # ↓ setup.dart::Build.mihomoTag 读这个，触发 mihomo 源码 patch + ldflags 注入
           MIHOMO_TAG: ${{ env.MIHOMO_TAG }}
         run: |
-          dart setup.dart ${{ matrix.platform }} \
-            ${{ matrix.arch && format('--arch {0}', matrix.arch) || '' }} \
-            ${{ env.IS_STABLE == 'true' && '--env stable' || '' }}
+          build_once() {
+            dart setup.dart ${{ matrix.platform }} \
+              ${{ matrix.arch && format('--arch {0}', matrix.arch) || '' }} \
+              ${{ env.IS_STABLE == 'true' && '--env stable' || '' }}
+          }
+          # Android 构建走 Gradle,会现拉 Kotlin/AGP 插件,偶发撞 Maven Central /
+          # plugins.gradle.org 网络抖动("Could not GET ...maven.apache.org")。
+          # Flutter 自带的 100ms 重试太快救不回,这里加带退避的重试(30s/60s);
+          # 配合上面的 Gradle 依赖缓存,第二次基本命中缓存不再走网络。
+          # 非 Android 平台行为不变:只跑一次。
+          if [ "${{ matrix.platform }}" = "android" ]; then
+            n=0; max=3
+            until build_once; do
+              n=$((n + 1))
+              if [ "$n" -ge "$max" ]; then
+                echo "::error::Android 构建重试 $max 次仍失败"
+                exit 1
+              fi
+              wait=$((n * 30))
+              echo "::warning::Android 构建失败(第 $n/$max 次),${wait}s 后重试(多为 Maven/Gradle 网络抖动)…"
+              sleep "$wait"
+            done
+          else
+            build_once
+          fi
 
       # ── 12a-mac. macOS: ad-hoc 签名 + 打包成 DMG ──
       #
