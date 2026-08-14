@@ -520,11 +520,13 @@ jobs:
                       txt = p.read_text(encoding='utf-8')
                       txt = txt.replace('ApexHelperService', f'{bin_prefix}HelperService')
                       p.write_text(txt, encoding='utf-8')
-                  # macOS project.pbxproj
+                  # macOS project.pbxproj —— 核 + helper 两个二进制引用都要跟品牌改名
+                  # (CopyFiles 段的 ApexCore / ApexHelperService PBXFileReference)。
                   p = Path('macos/Runner.xcodeproj/project.pbxproj')
                   if p.exists():
                       txt = p.read_text(encoding='utf-8')
-                      txt = txt.replace('ApexCore', f'{bin_prefix}Core')
+                      for old, new in _rename_map.items():
+                          txt = txt.replace(old, new)
                       p.write_text(txt, encoding='utf-8')
                   # 重命名 libclash 下的预编译二进制
                   for d in Path('libclash').glob('*'):
@@ -954,6 +956,18 @@ jobs:
             choco install innosetup -y --no-progress
           fi
           echo "/c/Program Files (x86)/Inno Setup 6" >> $GITHUB_PATH
+
+      # ── 4b. macOS：确保 cargo（setup.dart buildHelper 编 root helper 要用）──
+      # macos-latest 预装 Rust，但显式兜底：缺则装 rustup，保证 cargo 在 PATH。
+      - name: Ensure Rust toolchain (macOS helper)
+        if: matrix.platform == 'macos'
+        run: |
+          if ! command -v cargo &>/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+            source "$HOME/.cargo/env"
+          fi
+          cargo --version
 
       # ── 5. macOS：没有自定义 logo 时，从默认源图标生成全套 appiconset ──
       # 有 logo 时 inject 步骤已用 PIL 替换，这里只处理无 logo 的情况
