@@ -1338,13 +1338,14 @@ jobs:
           done
 
           # 签名主 App（ad-hoc，与上游 FlClash 一致）
-          # ⚠️ 必须带 --entitlements!ad-hoc 与 entitlements 不冲突（无需证书，可携带
-          # network / keychain-access-groups）。此前 `--sign -` 不带 --entitlements →
-          # 这步 --force 重签把 Xcode 应用的 Release.entitlements 全抹空 → 出厂包
-          # entitlements 为空 → flutter_secure_storage 写 Keychain 抛 -34018
-          # (errSecMissingEntitlement)，macOS 登录/加密受影响。
-          # keychain-access-groups 用本包 BUNDLE_ID（brand 相关，CI 期注入，不硬编码）。
-          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP_DIR/Contents/Info.plist" 2>/dev/null || echo "")
+          # ⚠️ 必须带 --entitlements!此前 `--sign -` 不带 --entitlements → 这步
+          # --force 重签把 Xcode 应用的 Release.entitlements（network/jit/
+          # disable-library-validation）全抹空 → 出厂包 entitlements 为空。
+          # ⚠️⚠️ 但**绝不能带 keychain-access-groups**！它是 restricted entitlement,
+          # ad-hoc 签名(无 team)claim 它会被 macOS amfid 拒绝启动（open 报
+          # "Launchd job spawn failed" error 163,且签名有效故 Gatekeeper 不给"仍然
+          # 打开" → 用户看到"打不开"死包）。实测坐实。token 的 Keychain 已有 SP 回退
+          # 兜底（app 侧 token_manager），无需靠 keychain-access-groups。
           SIGN_ENT="${RUNNER_TEMP:-/tmp}/sign.entitlements"
           if [ -f macos/Runner/Release.entitlements ]; then
             cp macos/Runner/Release.entitlements "$SIGN_ENT"
@@ -1358,11 +1359,8 @@ jobs:
               '<key>com.apple.security.cs.disable-library-validation</key><true/>' \
               '</dict></plist>' > "$SIGN_ENT"
           fi
+          # 防御:确保签名 entitlements 里绝无 keychain-access-groups（会让 ad-hoc 拒启动）。
           /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" "$SIGN_ENT" 2>/dev/null || true
-          if [ -n "$BUNDLE_ID" ]; then
-            /usr/libexec/PlistBuddy -c "Add :keychain-access-groups array" "$SIGN_ENT"
-            /usr/libexec/PlistBuddy -c "Add :keychain-access-groups:0 string $BUNDLE_ID" "$SIGN_ENT"
-          fi
           codesign --force --deep --sign - --entitlements "$SIGN_ENT" "$APP_DIR"
           echo "[sign] ✅ Ad-hoc signed with entitlements: $APP_DIR"
           echo "[sign] entitlements:"; codesign -d --entitlements :- "$APP_DIR" 2>/dev/null | tr -d '\0' || true; echo
