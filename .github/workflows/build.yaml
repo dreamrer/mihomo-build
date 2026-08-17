@@ -542,6 +542,22 @@ jobs:
           # ── 3. 替换版本号 ───────────────────────────────────
           ver = env('APP_VERSION')
           if ver:
+              # 【版本号归一化】pub 要求 version 主体必须是 X.Y.Z（三段整数）。运营在向导里
+              # 常填 "1.2"（两段）、"1"、甚至带非数字 → flutter pub get 直接
+              # "Invalid version number: Could not parse 1.2+..." 整个 build 报销（实测崩过）。
+              # 这里把主体补/截成恰好三段整数（非数字段当 0），保留 +buildNumber 部分。
+              _plus = ver.split('+', 1)
+              _nums = []
+              for _part in _plus[0].split('.'):
+                  _d = ''.join(_c for _c in _part if _c.isdigit())
+                  _nums.append(int(_d) if _d else 0)
+              while len(_nums) < 3:
+                  _nums.append(0)
+              _base = '.'.join(str(_n) for _n in _nums[:3])
+              _norm = _base + (('+' + _plus[1]) if len(_plus) > 1 else '')
+              if _norm != ver:
+                  print(f'[inject] 版本号归一化: {ver} → {_norm}')
+                  ver = _norm
               p = Path('pubspec.yaml')
               txt = p.read_text()
               # Flutter 要求 version: X.Y.Z+buildNumber，buildNumber 即 Android versionCode。
