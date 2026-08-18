@@ -137,6 +137,29 @@ on:
         required: false
         default: ''
 
+      # ── encrypt-middleware(opt-in 路径加密反代,抗DPI）──────────
+      # mw_aes_key 必须与中间件 .env 的 AES_KEY 一字不差;api_prefix 也要与中间件 API_PREFIX 一致。
+      mw_enabled:
+        description: 'encrypt-middleware 开关(true 启用路径加密;留空/false=关)'
+        required: false
+        default: ''
+      mw_aes_key:
+        description: 'encrypt-middleware AES_KEY(必须与中间件一致;mw_enabled=true 时必填)'
+        required: false
+        default: ''
+      mw_path_prefix:
+        description: 'encrypt-middleware PATH_PREFIX(默认 /assets/immutable)'
+        required: false
+        default: ''
+      mw_sub_prefix:
+        description: 'encrypt-middleware SUBSCRIPTION_PREFIX(默认 /sub)'
+        required: false
+        default: ''
+      mw_ext:
+        description: 'encrypt-middleware 密文 URL 伪装扩展名(默认 .js)'
+        required: false
+        default: ''
+
       # 客服 & 联系方式(telegram_channel/crisp_id/crisp_proxy_url/salesmartly_token)
       # 已移除:它们只走 OSS 远程配置(bot 的「生成加密配置」写进 contact,App 运行时
       # 拉取),CI 不消费、不烧录进包。作为 CI input 是白传死参,故不再声明。
@@ -1295,6 +1318,12 @@ jobs:
           API_PREFIX: ${{ inputs.api_prefix || '/api/v1' }}
           DELAY_DISCOUNT: ${{ inputs.delay_discount }}
           FIXED_INVITE_CODE: ${{ inputs.fixed_invite_code }}
+          # encrypt-middleware(opt-in 路径加密)。aes_key 必须与中间件 AES_KEY 一致
+          APEX_MW_ENABLED:     ${{ inputs.mw_enabled }}
+          APEX_MW_AES_KEY:     ${{ inputs.mw_aes_key }}
+          APEX_MW_PATH_PREFIX: ${{ inputs.mw_path_prefix }}
+          APEX_MW_SUB_PREFIX:  ${{ inputs.mw_sub_prefix }}
+          APEX_MW_EXT:         ${{ inputs.mw_ext }}
           ANDROID_FLAVOR: ${{ matrix.flavor || '' }}
           # ↓ setup.dart::Build.mihomoTag 读这个，触发 mihomo 源码 patch + ldflags 注入
           MIHOMO_TAG: ${{ env.MIHOMO_TAG }}
