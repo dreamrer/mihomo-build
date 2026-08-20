@@ -1502,21 +1502,33 @@ jobs:
           {
             printf '{\n'
             printf '  "title": "%s",\n' "$VOLNAME"
-            printf '  "icon-size": 128,\n'
-            printf '  "window": { "size": { "width": 600, "height": 460 } },\n'
+            printf '  "icon-size": 120,\n'
+            printf '  "window": { "size": { "width": 600, "height": 520 } },\n'
             printf '  "contents": [\n'
-            printf '    { "x": 300, "y": 120, "type": "file", "path": "%s/安装教程.txt" },\n' "$STAGING"
-            printf '    { "x": 165, "y": 300, "type": "file", "path": "%s/%s" },\n' "$STAGING" "$APP_NAME_BUNDLE"
-            printf '    { "x": 435, "y": 300, "type": "link", "path": "/Applications" }\n'
+            printf '    { "x": 300, "y": 130, "type": "file", "path": "%s/安装教程.txt" },\n' "$STAGING"
+            printf '    { "x": 165, "y": 330, "type": "file", "path": "%s/%s" },\n' "$STAGING" "$APP_NAME_BUNDLE"
+            printf '    { "x": 435, "y": 330, "type": "link", "path": "/Applications" }\n'
             printf '  ]\n'
             printf '}\n'
           } > "$SPEC"
 
           rm -f "$DMG_OUTPUT"
-          if npm install -g appdmg >/dev/null 2>&1 && appdmg "$SPEC" "$DMG_OUTPUT"; then
-            echo "[dmg] ✅ appdmg 布局成功"
+          # ⚠️ 不再 `>/dev/null 2>&1` 吞掉 appdmg 安装/运行的错误 —— 之前它把 appdmg 的
+          # 原生模块(fs-xattr 需 node-gyp 编译)失败悄悄咽了,于是每次都退回 hdiutil 默认
+          # 布局:带工具栏、窗口小、3 个图标被截断 → 用户投诉"要下拉才看得到"。现在:
+          #   ① 全局装失败就试 npx(免全局权限/PATH 问题);② 失败原因打进日志便于排查。
+          DMG_OK=0
+          if command -v appdmg >/dev/null 2>&1 || npm install -g appdmg; then
+            if appdmg "$SPEC" "$DMG_OUTPUT"; then DMG_OK=1; fi
+          fi
+          if [ "$DMG_OK" != 1 ]; then
+            echo "[dmg] 全局 appdmg 不可用,改试 npx appdmg…"
+            if npx --yes appdmg "$SPEC" "$DMG_OUTPUT"; then DMG_OK=1; fi
+          fi
+          if [ "$DMG_OK" = 1 ]; then
+            echo "[dmg] ✅ appdmg 布局成功(干净图标视图,无工具栏,不截断)"
           else
-            echo "[dmg] ⚠️ appdmg 不可用,退回 hdiutil(保证出包,布局默认)"
+            echo "[dmg] ⚠️ appdmg 仍不可用,退回 hdiutil(默认布局,可能被截断——见上方报错)"
             hdiutil create -volname "$VOLNAME" -srcfolder "$STAGING" \
               -ov -format UDZO -imagekey zlib-level=9 "$DMG_OUTPUT"
           fi
