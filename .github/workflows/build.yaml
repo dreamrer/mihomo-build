@@ -1306,6 +1306,11 @@ jobs:
           API_PREFIX: ${{ inputs.api_prefix || '/api/v1' }}
           DELAY_DISCOUNT: ${{ inputs.delay_discount }}
           FIXED_INVITE_CODE: ${{ inputs.fixed_invite_code }}
+          # 【更新签名 · 2026-08-22 审计 H1】固定开发者公钥(base64),全 airport 通用,走仓库
+          # variable(公钥公开,非 secret)。空 → setup.dart 跳过 → 客户端验签关闭(行为不变)。
+          # 私钥只在下方签名步骤用 secret,绝不注入客户端。
+          UPDATE_PUBKEY_ED25519:    ${{ vars.UPDATE_PUBKEY_ED25519 }}
+          UPDATE_REQUIRE_SIGNATURE: ${{ vars.UPDATE_REQUIRE_SIGNATURE }}
           # encrypt-middleware(opt-in 路径加密):从 1 个 mw JSON 串展开(规避 input 上限 25)。
           # fromJSON('{}').xxx = null → 渲染成空串 → setup.dart 跳过空 dart-define → 客户端用默认
           # (/assets/immutable、/sub、.js),正好匹配中间件默认。aes_key 必须与中间件 AES_KEY 一致。
