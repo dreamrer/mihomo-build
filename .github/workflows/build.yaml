@@ -98,6 +98,14 @@ on:
         required: false
         default: 'yes'
 
+      # ── 默认语言 ───────────────────────────────────────────
+      # 用户未在 App 内主动选语言时的默认语言。值:zh_CN/en/ja/ru 等。
+      # 留空 = zh_CN。由 build-bot「默认语言」选项传入。
+      default_locale:
+        description: '默认语言（zh_CN/en/ja/ru，默认 zh_CN）'
+        required: false
+        default: ''
+
       # ── 加密密钥（与 App 源码 _xorKey 及 Bot 生成远程配置时使用相同的密钥）──
       xor_key:
         description: 'XOR 加密密钥（必须与 App 端 _xorKey 完全一致，≥16 字符）'
@@ -1306,6 +1314,8 @@ jobs:
           API_PREFIX: ${{ inputs.api_prefix || '/api/v1' }}
           DELAY_DISCOUNT: ${{ inputs.delay_discount }}
           FIXED_INVITE_CODE: ${{ inputs.fixed_invite_code }}
+          # 默认语言(用户未主动选语言时用);空 → setup.dart 跳过 → 客户端默认 zh_CN。
+          DEFAULT_LOCALE: ${{ inputs.default_locale }}
           # 【更新签名 · 2026-08-22 审计 H1】固定开发者公钥(base64),全 airport 通用,走仓库
           # variable(公钥公开,非 secret)。空 → setup.dart 跳过 → 客户端验签关闭(行为不变)。
           # 私钥只在下方签名步骤用 secret,绝不注入客户端。
