@@ -1259,18 +1259,33 @@ jobs:
         shell: bash
         run: |
           USER_TAG="${{ inputs.mihomo_tag }}"
-          if [ -z "$USER_TAG" ]; then
-            # 6 位 hex + apx 前缀（首字符必须字母，否则 Go const 字符串里某些场景报错）
-            TAG="apx$(openssl rand -hex 3)"
-            echo "[mihomo_tag] auto-generated: $TAG"
-          else
-            # 用户输入：必须只含 [A-Za-z0-9_-] 且 ≤ 32（与 scripts/obfuscate_mihomo.sh 校验一致）
+          PLATFORM="${{ matrix.platform }}"
+          if [ -n "$USER_TAG" ]; then
+            # 用户显式指定 → 所有平台都用它（必须只含 [A-Za-z0-9_-] 且 ≤ 32，
+            # 与 scripts/obfuscate_mihomo.sh 校验一致）
             if ! [[ "$USER_TAG" =~ ^[A-Za-z0-9_-]+$ ]] || [ ${#USER_TAG} -gt 32 ]; then
               echo "❌ inputs.mihomo_tag 不合法（需 [A-Za-z0-9_-]{1,32}）: '$USER_TAG'"
               exit 1
             fi
             TAG="$USER_TAG"
             echo "[mihomo_tag] user-provided: $TAG"
+          elif [ "$PLATFORM" = "android" ]; then
+            # 【安卓】每次随机（apx + 6 位 hex，首字符字母），让国产手机厂商 OEM 应用
+            # 风控扫描器学不到固定特征——安卓 APK 里的 native 核会被静态扫描字符串。
+            TAG="apx$(openssl rand -hex 3)"
+            echo "[mihomo_tag] android auto-random: $TAG"
+          else
+            # 【桌面 win/mac/linux】固定 tag，绝不随机。
+            # 桌面 .exe 不经过手机厂商 OEM 扫描，随机 tag 对它零收益、纯伤害:
+            # PC 杀毒(火绒/360/Defender)靠 hash 白名单 + 云信誉工作,随机 tag =
+            # 每次出包都是全新 hash = 杀毒云永远学不到"这是安全的" = 启发式永远误报
+            # (HEUR/Generic),而且白名单申诉也无效(下次 hash 又变)。
+            # 固定 → 全品牌全版本同一个 ApexCore hash → 申诉一次永久全通用 + 云信誉可
+            # 积累。客户端对 tag 的 4 处字段零依赖(启动传 -d 覆盖 const Name / 不校验
+            # API "hello" / 不引用 MihomoName / TableName 是 Linux 路由表概念,Windows
+            # 用 wintun 不涉及),固定安全无副作用。见 2026-08-27 杀毒误报核查。
+            TAG="apex"
+            echo "[mihomo_tag] desktop fixed: $TAG"
           fi
           echo "MIHOMO_TAG=$TAG" >> "$GITHUB_ENV"
 
