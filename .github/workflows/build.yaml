@@ -1353,26 +1353,32 @@ jobs:
               ${{ matrix.arch && format('--arch {0}', matrix.arch) || '' }} \
               ${{ env.IS_STABLE == 'true' && '--env stable' || '' }}
           }
-          # Android 构建走 Gradle,会现拉 Kotlin/AGP 插件,偶发撞 Maven Central /
-          # plugins.gradle.org 网络抖动("Could not GET ...maven.apache.org")。
-          # Flutter 自带的 100ms 重试太快救不回,这里加带退避的重试(30s/60s);
-          # 配合上面的 Gradle 依赖缓存,第二次基本命中缓存不再走网络。
-          # 非 Android 平台行为不变:只跑一次。
-          if [ "${{ matrix.platform }}" = "android" ]; then
-            n=0; max=3
-            until build_once; do
-              n=$((n + 1))
-              if [ "$n" -ge "$max" ]; then
-                echo "::error::Android 构建重试 $max 次仍失败"
-                exit 1
-              fi
-              wait=$((n * 30))
-              echo "::warning::Android 构建失败(第 $n/$max 次),${wait}s 后重试(多为 Maven/Gradle 网络抖动)…"
-              sleep "$wait"
-            done
-          else
-            build_once
-          fi
+          # 【重试推广到所有平台 · 2026-09-01 runs/33518846742】
+          # 原来只有 Android 有重试(Gradle 拉 Maven 的抖动)。但**每个平台**都要先
+          # 构建 Go 内核,而 Setup Go 是 `cache: false`(mihomo 源码在构建期才拉下来,
+          # setup-go 在那之前算不出 go.sum 缓存键),等于每次都从零拉全部 Go 依赖 ——
+          # 网络暴露面最大的一步反而没有重试。
+          #
+          # 实际失败(Windows,runs/33518846742):
+          #   adapter\outbound\ssh.go:18:2: github.com/metacubex/ssh@v0.1.0:
+          #     Get "https://proxy.golang.org/.../v0.1.0.mod":
+          #     wsarecv: An existing connection was forcibly closed by the remote host
+          #   Unhandled exception: build official mihomo error
+          # 注:GOPROXY 默认的 `,direct` 回退**只在 404/410 时生效**,连接被掐这种
+          # 网络错误不会触发回退,所以只能靠重试。
+          #
+          # 三次带退避(30s/60s)。构建本身幂等,重跑安全。
+          n=0; max=3
+          until build_once; do
+            n=$((n + 1))
+            if [ "$n" -ge "$max" ]; then
+              echo "::error::${{ matrix.platform }} 构建重试 $max 次仍失败"
+              exit 1
+            fi
+            wait=$((n * 30))
+            echo "::warning::${{ matrix.platform }} 构建失败(第 $n/$max 次),${wait}s 后重试(多为 Go module / Maven 网络抖动)…"
+            sleep "$wait"
+          done
 
       # ── 12a-mac. macOS: ad-hoc 签名 + 打包成 DMG ──
       #
