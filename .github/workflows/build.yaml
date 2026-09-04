@@ -1257,8 +1257,15 @@ jobs:
       - name: Compute MIHOMO_TAG
         if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
         shell: bash
+        # 【禁止把 inputs 直接内插进 run: · 2026-09-04 审计 HIGH】
+        # `${{ }}` 是在 shell 启动**之前**做文本替换的,值里带一个双引号就能越出
+        # 字符串、拼出任意命令。下面第 4 行那个 `=~ ^[A-Za-z0-9_-]+$` 校验挡不住
+        # 它 —— 注入发生在替换阶段,校验那行根本轮不到执行。
+        # 走 env: 后 shell 只看到一个普通变量,内容不再参与解析。
+        env:
+          USER_TAG_RAW: ${{ inputs.mihomo_tag }}
         run: |
-          USER_TAG="${{ inputs.mihomo_tag }}"
+          USER_TAG="$USER_TAG_RAW"
           PLATFORM="${{ matrix.platform }}"
           if [ -n "$USER_TAG" ]; then
             # 用户显式指定 → 所有平台都用它（必须只含 [A-Za-z0-9_-] 且 ≤ 32，
@@ -1679,11 +1686,16 @@ jobs:
       # ── 12d. Windows: Inno Setup 打包 ────────────────────────
       - name: Build Windows installer (Inno Setup)
         if: matrix.platform == 'windows'
+        # 见 Compute MIHOMO_TAG 处的说明:inputs 一律走 env,不内插进 run:。
+        # app_name 是机场主在 TG 里随手输入的显示名,bot 侧原本零校验。
+        env:
+          APP_NAME_RAW: ${{ inputs.app_name }}
+          APP_VERSION_RAW: ${{ inputs.app_version }}
         run: |
-          APP_NAME="${{ inputs.app_name }}"
+          APP_NAME="$APP_NAME_RAW"
           APP_NAME="${APP_NAME:-Apex}"
 
-          APP_VERSION="${{ inputs.app_version }}"
+          APP_VERSION="$APP_VERSION_RAW"
           if [ -z "$APP_VERSION" ]; then
             APP_VERSION=$(grep "^version:" pubspec.yaml | sed 's/version: //' | sed 's/+.*//')
           fi
@@ -1918,11 +1930,14 @@ jobs:
 
       - name: Get version
         id: version
+        # inputs 走 env,不内插进 run:(见 Compute MIHOMO_TAG 处说明)。
+        env:
+          APP_VERSION_RAW: ${{ inputs.app_version }}
         run: |
           # 与桌面/移动端同源:优先用机器人设的 app_version(inputs),空时才回退
           # pubspec.yaml。此前只读 pubspec → OpenWrt 产物版本(4.0.2)和 app 版本
           # (机器人设的 3.7.6)对不上。
-          VER="${{ inputs.app_version }}"
+          VER="$APP_VERSION_RAW"
           [ -z "$VER" ] && VER=$(grep -oP 'version:\s*\K[\d.]+' pubspec.yaml || echo "0.0.0")
           echo "version=$VER" >> $GITHUB_OUTPUT
 
@@ -1932,11 +1947,14 @@ jobs:
           XOR_KEY:           ${{ inputs.xor_key }}
           APEX_FLAG:         ${{ inputs.apex_flag || 'apex' }}
           ENABLE_ENCRYPTION: ${{ inputs.enable_encryption || 'yes' }}
+          # inputs 走 env,不内插进 run:(见 Compute MIHOMO_TAG 处说明)。
+          APP_NAME_RAW:      ${{ inputs.app_name || 'mihomo' }}
+          VER_RAW:           ${{ steps.version.outputs.version }}
         run: |
           set -e
-          VER="${{ steps.version.outputs.version }}"
+          VER="$VER_RAW"
           BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          APP_NAME="${{ inputs.app_name || 'mihomo' }}"
+          APP_NAME="$APP_NAME_RAW"
           # opkg 包标识符必须 ASCII：app_name 可能含中文（仅用于描述），
           # 包名/文件名统一用 ASCII 安全的 PKG_NAME。
           PKG_NAME="$(printf '%s' "$APP_NAME" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cd 'a-z0-9-')"
