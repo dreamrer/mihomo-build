@@ -1835,7 +1835,18 @@ jobs:
               body += f"--{boundary}--\r\n".encode("utf-8")
               return boundary, body
 
+          # Telegram Bot API 单文件上限 50MB。安卓 universal 包常年 150MB+,
+          # 硬发只会拿到一句看不懂的 API 错误。当前流程本来就走 GitHub 下载
+          # (BUILD_BOT_TOKEN 默认不配),这里只是防止以后有人配上 token 后
+          # 对着静默失败排查。
+          TG_MAX_BYTES = 50 * 1024 * 1024
+
           def send_document(fp):
+              size = fp.stat().st_size
+              if size > TG_MAX_BYTES:
+                  print(f"[notify] skip {fp.name}: {size // 1024 // 1024}MB "
+                        f"超过 Telegram 50MB 上限,请从 Actions 下载")
+                  return
               boundary, body = make_multipart(
                   {"chat_id": chat_id},
                   [("document", fp.name, fp.read_bytes())],
