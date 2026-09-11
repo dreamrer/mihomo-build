@@ -1,0 +1,2307 @@
+name: Build
+
+# ============================================================
+# 公共构建仓库：仅含 workflow，私有源码通过 PAT 在 CI 内拉取。
+#
+# 必须在本仓库 Settings → Secrets and variables → Actions 中配置：
+#   PRIVATE_REPO_TOKEN  - 有私有仓库 read 权限的 PAT
+#   BUILD_BOT_TOKEN     - TG Bot Token（用于构建完成后发包，可与业务 Bot 共用）
+#
+# 【Android 正式签名（可选，不配置则用 debug 签名）】
+#   KEYSTORE            - keystore.jks 的 base64 编码
+#   KEY_ALIAS           - keystore 别名
+#   STORE_PASSWORD      - keystore 密码
+#   KEY_PASSWORD        - key 密码
+# ============================================================
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '私有仓库的 tag/branch（如 v1.0.15 或 main）'
+        required: true
+        default: 'main'
+
+      # 私有源码仓库。留空 = 用仓库 Secret PRIVATE_REPO_NAME（老行为）。
+      # 由打包机器人按全局设置注入，用于在多条产品线之间切换源码仓
+      # （如 dreamrer/app 与 dreamrer/app2）。
+      # ⚠️ ref 是**跟着仓库走**的：切仓时务必确认该 tag 在目标仓里存在，
+      #    否则 checkout 直接失败。机器人侧已按仓库分别记 ref。
+      source_repo:
+        description: '私有源码仓库 owner/name（留空=用 Secret 里的默认仓）'
+        required: false
+        default: ''
+
+      # ── 构建目标 ────────────────────────────────────────────
+      platforms:
+        description: '构建平台，逗号分隔（android,windows,linux,macos,openwrt），留空=全部'
+        required: false
+        default: ''
+
+      # ── 品牌定制 ────────────────────────────────────────────
+      app_name:
+        description: 'App 显示名称（留空=不修改）'
+        required: false
+        default: ''
+      app_name_en:
+        description: '英文名（HTTP User-Agent / 订阅 UA 用，ASCII，留空=Apex）'
+        required: false
+        default: ''
+      app_logo_url:
+        description: 'App Logo URL（PNG，建议 1024x1024，留空=不修改）'
+        required: false
+        default: ''
+      app_version:
+        description: '版本号（如 1.2.0，留空=不修改）'
+        required: false
+        default: ''
+
+      # ── 远程配置源（最多 4 个，主 + 3 个备用）──────────────
+      oss_url_1:
+        description: '主配置源 URL（config.json）'
+        required: false
+        default: ''
+      oss_url_2:
+        description: '备用配置源 2（可选）'
+        required: false
+        default: ''
+      oss_url_3:
+        description: '备用配置源 3（可选）'
+        required: false
+        default: ''
+      oss_url_4:
+        description: '备用配置源 4（可选）'
+        required: false
+        default: ''
+      panel_type:
+        description: 'panel_type（xboard / v2board）'
+        required: false
+        default: 'xboard'
+      api_prefix:
+        description: 'API 路径前缀（默认 /api/v1）'
+        required: false
+        default: '/api/v1'
+
+      # ── 默认 UA ────────────────────────────────────────────
+      default_ua:
+        description: '默认 User-Agent（留空=Apex/v版本号，后端通过 flag 参数协商格式，UA 仅用于标识）'
+        required: false
+        default: ''
+
+      # ── APEX_FLAG ──────────────────────────────────────────
+      # 由 build-bot 从 default_ua 派生（slug 化），客户端订阅请求附带
+      # ?flag=<APEX_FLAG>，与服务端 Apex.php 中 $flag 必须一致。
+      # 留空 = 'apex'（默认 UA 对应的派生值）。
+      apex_flag:
+        description: 'Apex 协议匹配 flag（默认 apex，自定义 UA 时由 bot 派生）'
+        required: false
+        default: ''
+
+      # ── 是否启用订阅加密 ───────────────────────────────────
+      # yes = 客户端走 ?flag=apex 加密订阅端点，机场主必须装 Apex.php 服务端补丁
+      # no  = 客户端走面板原生 Clash 订阅（明文 YAML），不需要装 Apex.php
+      enable_encryption:
+        description: '订阅加密（yes/no，默认 yes）'
+        required: false
+        default: 'yes'
+
+      # ── 默认语言 ───────────────────────────────────────────
+      # 用户未在 App 内主动选语言时的默认语言。值:zh_CN/en/ja/ru 等。
+      # 留空 = zh_CN。由 build-bot「默认语言」选项传入。
+      default_locale:
+        description: '默认语言（zh_CN/en/ja/ru，默认 zh_CN）'
+        required: false
+        default: ''
+
+      # ── 加密密钥（与 App 源码 _xorKey 及 Bot 生成远程配置时使用相同的密钥）──
+      xor_key:
+        description: 'XOR 加密密钥（必须与 App 端 _xorKey 完全一致，≥16 字符）'
+        required: false
+        default: ''
+
+      # ── Android applicationId（可选自定义包名，默认 com.apex.vpn）────
+      package_name:
+        description: 'Android 包名（applicationId，反向域名格式，留空=com.apex.vpn）'
+        required: false
+        default: ''
+
+      # ── 延迟显示美化（可选）─────────────────────────────────
+      delay_discount:
+        description: '节点延迟显示打折百分比（0–90，仅影响 UI；选路仍用真实延迟）。留空=不打折'
+        required: false
+        default: ''
+
+      # ── Mihomo 反风控代号（绕过小米/华为/OPPO 风控扫描）──
+      # 编译时注入 mihomo 内核显示用的字符串特征（const Name / MihomoName /
+      # Version / TUN TableName / route hello 等 4-6 处）。
+      # 留空 = workflow 自动生成 6 位随机 hex（每次出包不同代号，
+      # 让厂商扫描器学不到固定签名）。
+      # 自定义 = [A-Za-z0-9_-]{1,32}（详见 scripts/obfuscate_mihomo.sh 校验）
+      mihomo_tag:
+        description: 'Mihomo 反风控代号（留空=自动随机；自定义需 [A-Za-z0-9_-]{1,32}）'
+        required: false
+        default: ''
+
+      # ── 代理专用固定邀请码（烧录进包 + 双写 OSS）────────
+      # 非空 → APK 内所有新用户注册强制用这个码, 邀请码输入框预填 + 禁用编辑.
+      # 打包机器人**必须**把这个字段对普通授权用户设为**只读**, 不然授权用户
+      # 可以随意改成别人的邀请码给所有代理无限打包盗流量.
+      # 客户端读取顺序: dart-define > OSS contact.fixed_invite_code > 空.
+      fixed_invite_code:
+        description: '代理专用客户端固定邀请码（留空=用户手填注册；填了=APK 锁死走该代理）'
+        required: false
+        default: ''
+
+      # ── encrypt-middleware(opt-in 路径加密反代,抗DPI）──────────
+      # ⚠️ 5 个子项合并成 1 个 JSON 串:workflow_dispatch 顶层 input 上限是 25
+      #    (2025-12 从 10 提到 25),独立 5 个会让本文件 22→27 超限 → GitHub 判
+      #    workflow 非法、dispatch 直接被拒(0-job 失败 run)。合并后 22→23,稳在线下。
+      #    bot 侧 json.dumps 打包,CI 用 fromJSON(inputs.mw || '{}').xxx 展开。
+      #    aes_key 必须与中间件 .env 的 AES_KEY 一字不差;api_prefix 也要与中间件 API_PREFIX 一致。
+      mw:
+        description: 'encrypt-middleware 配置 JSON,如 {"enabled":"true","aes_key":"...","path_prefix":"","sub_prefix":"","ext":""};留空/{}=不启用'
+        required: false
+        default: '{}'
+
+      # 客服 & 联系方式(telegram_channel/crisp_id/crisp_proxy_url/salesmartly_token)
+      # 已移除:它们只走 OSS 远程配置(bot 的「生成加密配置」写进 contact,App 运行时
+      # 拉取),CI 不消费、不烧录进包。作为 CI input 是白传死参,故不再声明。
+
+      # ── 构建完成通知 ────────────────────────────────────────
+      notify_chat_id:
+        description: '构建完成后发包的 TG Chat ID（Bot Token 存 secret BUILD_BOT_TOKEN）'
+        required: false
+        default: ''
+
+      # Bot 生成的一次性关联标识（uuid）。workflow_dispatch API 不回 run_id，
+      # Bot 靠它把 dispatch 精确认领到对应 run（见下方 run-name）。多个用户
+      # 几乎同时打包时，避免按时间窗抢错别人的 run。push 触发时为空。
+      build_token:
+        description: '一次性关联标识（Bot 内部使用，手动触发可留空）'
+        required: false
+        default: ''
+
+# run 显示名 = build_token，Bot 用 GET runs 列表按 name 精确认领本次 dispatch。
+# 留空（push / 手动无 token）时回退到普通名，不与 Bot 的 uuid 冲突。
+run-name: ${{ inputs.build_token != '' && inputs.build_token || format('Build {0}', github.ref_name) }}
+
+env:
+  PRIVATE_REF: ${{ github.event_name == 'push' && github.ref_name || inputs.ref }}
+  IS_STABLE: ${{ github.event_name == 'push' && !contains(github.ref, '-') || github.event_name != 'push' && !contains(inputs.ref, '-') }}
+
+jobs:
+  # ── 预处理：根据 inputs.platforms 动态生成矩阵 ─────────────
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      has_matrix: ${{ steps.set-matrix.outputs.has_matrix }}
+    steps:
+      - name: Set build matrix
+        id: set-matrix
+        run: |
+          python3 << 'EOF'
+          import json, os
+
+          all_items = [
+            {"platform": "android", "os": "ubuntu-latest",  "flavor": "mobile"},
+            {"platform": "android", "os": "ubuntu-latest",  "flavor": "tv"},
+            {"platform": "linux",   "os": "ubuntu-latest",  "arch": "amd64"},
+            {"platform": "macos",   "os": "macos-latest",   "arch": "universal"},
+            {"platform": "windows", "os": "windows-latest", "arch": "amd64"},
+          ]
+
+          # 平台选择映射：
+          #   "android-mobile" → android flavor=mobile
+          #   "android-tv"     → android flavor=tv
+          #   "android"        → android mobile + tv（向后兼容）
+          event_name   = os.environ.get("EVENT_NAME", "")
+          platforms_in = os.environ.get("PLATFORMS", "").strip()
+
+          if event_name == "push" or not platforms_in:
+            filtered = all_items
+          else:
+            selected = {p.strip() for p in platforms_in.split(",") if p.strip()}
+            filtered = []
+            for item in all_items:
+              if item["platform"] == "android":
+                flavor = item.get("flavor", "")
+                # "android" 选中两者，"android-mobile"/"android-tv" 单选
+                if "android" in selected or f"android-{flavor}" in selected:
+                  filtered.append(item)
+              else:
+                if item["platform"] in selected:
+                  filtered.append(item)
+
+          matrix = json.dumps({"include": filtered}) if filtered else json.dumps({"include": [{"platform": "noop", "os": "ubuntu-latest"}]})
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"matrix={matrix}\n")
+            f.write(f"has_matrix={'true' if filtered else 'false'}\n")
+          EOF
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PLATFORMS:  ${{ inputs.platforms }}
+
+  build:
+    needs: setup
+    if: needs.setup.outputs.has_matrix == 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+
+    steps:
+      # ── 0. 配置 git 凭据 ────────────────────────────────────
+      - name: Configure git credentials
+        run: |
+          git config --global credential.helper ""
+          git config --global url."https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "git@github.com:"
+          git config --global url."https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      # ── 0b. ubuntu-latest 磁盘清理: TV/linux build 把 14GB 装满会爆 ──────
+      # ubuntu-latest 预装的 .NET / Haskell / CodeQL / boost / Swift 等加起来 ~17GB,
+      # 全删放出 ~25GB. mihomo Go build cache + NDK r28 (5GB) + Android SDK 31 + Gradle
+      # cache 加起来很容易撑爆默认的 14GB free, 见 run 27546929826 TV 35min 跑到一半
+      # System.IO.IOException: No space left on device.
+      - name: Free disk space (ubuntu-latest)
+        if: runner.os == 'Linux'
+        run: |
+          echo "=== Before ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet         || true
+          sudo rm -rf /opt/ghc                  || true
+          sudo rm -rf /usr/local/.ghcup         || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /opt/hostedtoolcache/boost  || true
+          sudo rm -rf /opt/hostedtoolcache/PyPy   || true
+          sudo rm -rf /opt/microsoft            || true
+          # Android SDK 我们要用, 不删. 删 docker 缓存镜像.
+          docker rmi $(docker images -q) 2>/dev/null || true
+          # swap 占 4GB
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile /swapfile || true
+          echo "=== After ==="
+          df -h /
+
+      # ── 1. 拉取私有源码 ─────────────────────────────────────
+      - name: Checkout private source
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        uses: actions/checkout@v4
+        with:
+          # inputs.source_repo 为空/非 dispatch 触发时回落 Secret（向后兼容）
+          repository: ${{ inputs.source_repo || secrets.PRIVATE_REPO_NAME }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          submodules: recursive
+          ref: ${{ env.PRIVATE_REF }}
+
+      # ── 1b. 参数契约守卫 ────────────────────────────────────
+      # 本 workflow 服务多个源码仓（见 source_repo）。参数从这里以 env 注入，
+      # 但真正转成 --dart-define 的是**源码仓自己的** setup.dart（它按一份写死
+      # 的名单去环境变量里捞，名单里没有的直接跳过，不报错）。
+      #
+      # 于是：在这里加了新参数、只改了 A 仓的 setup.dart、忘了 B 仓 —— 用 B 仓
+      # 打包会构建成功、日志干净、机器人显示 ✅，但那个参数根本没进包。要等用户
+      # 投诉才会发现。这一步把「静默残废」变成「当场失败」。
+      #
+      # 加新的 dart-define 参数时，把名字同时加到下面和所有源码仓的 setup.dart。
+      - name: Verify setup.dart dart-define contract
+        if: github.event_name == 'workflow_dispatch'
+        # 仓库名走 env 传入：${{ }} 是 shell 启动前的文本替换，直接内插进
+        # run: 等于把值当代码拼，一个双引号就能注入命令（见 tests/test_input_hardening.py）
+        env:
+          SRC_REPO: ${{ inputs.source_repo || secrets.PRIVATE_REPO_NAME }}
+        run: |
+          set -euo pipefail
+          REQUIRED="XOR_KEY APEX_FLAG ENABLE_ENCRYPTION OSS_URL_1 OSS_URL_2 \
+                    OSS_URL_3 OSS_URL_4 PANEL_TYPE API_PREFIX APP_NAME \
+                    APP_NAME_EN DELAY_DISCOUNT FIXED_INVITE_CODE"
+          MISSING=""
+          for K in $REQUIRED; do
+            # 注意引号:run: | 是字面量块,shell 直接拿到这一行,**不需要**再套
+            # 一层转义。原来写成 "'"'"'$K'"'"'",bash 解出来的模式是 '"KEY"'
+            # (多了一对双引号),而 setup.dart 里是 'KEY' —— 于是 13 个 key 全被
+            # 判为缺失,这个守卫从加上那天起就没通过过一次。
+            grep -q "'$K'" setup.dart || MISSING="$MISSING $K"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::setup.dart 的 dart-define 名单缺少:$MISSING"
+            echo ""
+            echo "源码仓 \"$SRC_REPO\" 的 setup.dart"
+            echo "落后于本构建脚本的参数契约。这些参数会被注入环境变量但**不会**"
+            echo "转成 dart-define，客户端读到默认值 —— 打出来的包配置不全且无提示。"
+            echo ""
+            echo "修法: 把上面列出的名字加进该仓 setup.dart 的 _buildDartDefineArgs.keys"
+            exit 1
+          fi
+          echo "✅ dart-define 契约齐全 ($(echo $REQUIRED | wc -w) 个参数)"
+
+      # ── 2. 注入构建参数（仅 workflow_dispatch 触发时执行）────
+      - name: Inject build parameters
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          PYTHONUTF8:     "1"
+          APP_NAME:       ${{ inputs.app_name }}
+          APP_LOGO_URL:   ${{ inputs.app_logo_url }}
+          APP_VERSION:    ${{ inputs.app_version }}
+          PANEL_TYPE:     ${{ inputs.panel_type || 'xboard' }}
+          API_PREFIX:     ${{ inputs.api_prefix || '/api/v1' }}
+          OSS_URL_1:      ${{ inputs.oss_url_1 }}
+          OSS_URL_2:      ${{ inputs.oss_url_2 }}
+          OSS_URL_3:      ${{ inputs.oss_url_3 }}
+          OSS_URL_4:      ${{ inputs.oss_url_4 }}
+          DEFAULT_UA:     ${{ inputs.default_ua }}
+          TARGET_PLATFORM: ${{ matrix.platform }}
+        run: |
+          python3 -m pip install Pillow pyyaml pypinyin --quiet --break-system-packages 2>/dev/null || \
+          python3 -m pip install Pillow pyyaml pypinyin --quiet --user 2>/dev/null || \
+          python3 -m pip install Pillow pyyaml pypinyin --quiet
+          python3 -X utf8 << 'PYEOF'
+          import os, re, io, time, urllib.request
+          from pathlib import Path
+
+          def env(k, d=''):
+              return os.environ.get(k, d).strip()
+
+          # ── 1. 替换应用名称 ─────────────────────────────────
+          app_name = env('APP_NAME')
+          if app_name:
+              # Android strings.xml
+              p = Path('android/app/src/main/res/values/strings.xml')
+              if p.exists():
+                  p.write_text(re.sub(
+                      r'<string name="app_name">[^<]*</string>',
+                      f'<string name="app_name">{app_name}</string>',
+                      p.read_text()
+                  ))
+                  print(f'[inject] Android app_name → {app_name}')
+              # Windows CMakeLists.txt（控制 .exe 文件名，CMake 不支持中文/非 ASCII）
+              win_binary = re.sub(r'[\s/\\:*?"<>|]+', '_', app_name)
+              win_binary = re.sub(r'[^\x00-\x7F]+', '', win_binary)   # 去掉中文等非 ASCII
+              win_binary = re.sub(r'[^a-zA-Z0-9_-]+', '_', win_binary).strip('_') or 'Apex'
+              p = Path('windows/CMakeLists.txt')
+              if p.exists():
+                  p.write_text(re.sub(
+                      r'set\(BINARY_NAME\s+"[^"]*"\)',
+                      f'set(BINARY_NAME "{win_binary}")', p.read_text()
+                  ))
+                  print(f'[inject] Windows BINARY_NAME → {win_binary}')
+              # Windows packaging/exe/make_config.yaml（installer 配置，executable_name 必须与 BINARY_NAME 一致）
+              p = Path('windows/packaging/exe/make_config.yaml')
+              if p.exists():
+                  import yaml as _yaml2
+                  cfg = _yaml2.safe_load(p.read_text()) or {}
+                  cfg['app_name'] = app_name
+                  cfg['display_name'] = app_name
+                  cfg['install_dir_name'] = '{pf}\\' + app_name
+                  cfg['executable_name'] = f'{win_binary}.exe'
+                  cfg['output_base_file_name'] = win_binary
+                  p.write_text(_yaml2.dump(cfg, default_flow_style=False, allow_unicode=True))
+                  print(f'[inject] Windows make_config.yaml → display_name={app_name}, install_dir={app_name}')
+              # Windows Runner.rc（文件属性 ProductName / FileDescription）
+              p = Path('windows/runner/Runner.rc')
+              if p.exists():
+                  txt = p.read_text(encoding='utf-8', errors='replace')
+                  txt = re.sub(r'VALUE "ProductName",\s*"[^"]*"',    f'VALUE "ProductName", "{app_name}"',    txt)
+                  txt = re.sub(r'VALUE "FileDescription",\s*"[^"]*"', f'VALUE "FileDescription", "{app_name}"', txt)
+                  p.write_text(txt, encoding='utf-8')
+                  print(f'[inject] Windows ProductName → {app_name}')
+              # Windows main.cpp（窗口标题，直接写 UTF-8 中文，CMakeLists 已加 /utf-8）
+              p = Path('windows/runner/main.cpp')
+              if p.exists():
+                  txt = p.read_text(encoding='utf-8')
+                  txt = re.sub(
+                      r'window\.Create\(L"[^"]*"',
+                      f'window.Create(L"{app_name}"', txt
+                  )
+                  p.write_text(txt, encoding='utf-8-sig')
+                  print(f'[inject] Windows window title → {app_name}')
+              # macOS Info.plist
+              p = Path('macos/Runner/Info.plist')
+              if p.exists():
+                  txt = p.read_text()
+                  txt = re.sub(
+                      r'(<key>CFBundleName</key>\s*<string>)[^<]*(</string>)',
+                      rf'\g<1>{app_name}\g<2>', txt)
+                  txt = re.sub(
+                      r'(<key>CFBundleDisplayName</key>\s*<string>)[^<]*(</string>)',
+                      rf'\g<1>{app_name}\g<2>', txt)
+                  p.write_text(txt)
+                  print(f'[inject] macOS CFBundleName/CFBundleDisplayName → {app_name}')
+              # macOS AppInfo.xcconfig PRODUCT_NAME（决定 .app 文件名）
+              # macOS Xcode 原生支持 Unicode，PRODUCT_NAME 可直接使用中文
+              # （不同于 Windows CMake / Linux deb 需要 ASCII）
+              mac_binary = app_name
+              p = Path('macos/Runner/Configs/AppInfo.xcconfig')
+              if p.exists():
+                  txt = p.read_text()
+                  txt = re.sub(
+                      r'^PRODUCT_NAME\s*=\s*.*$',
+                      f'PRODUCT_NAME = {mac_binary}',
+                      txt, flags=re.MULTILINE
+                  )
+                  txt = re.sub(
+                      r'^DISPLAY_NAME\s*=\s*.*$',
+                      f'DISPLAY_NAME = {app_name}',
+                      txt, flags=re.MULTILINE
+                  )
+                  p.write_text(txt)
+                  print(f'[inject] macOS PRODUCT_NAME → {mac_binary}, DISPLAY_NAME → {app_name}')
+              # macOS DMG make_config.yaml（appdmg 引用的 .app 路径）
+              p = Path('macos/packaging/dmg/make_config.yaml')
+              if p.exists():
+                  import yaml as _yaml_dmg
+                  dmg_cfg = _yaml_dmg.safe_load(p.read_text()) or {}
+                  dmg_cfg['title'] = app_name
+                  for item in dmg_cfg.get('contents', []):
+                      if item.get('type') == 'file' and str(item.get('path', '')).endswith('.app'):
+                          item['path'] = f'{mac_binary}.app'
+                  p.write_text(_yaml_dmg.dump(dmg_cfg, default_flow_style=False, allow_unicode=True))
+                  print(f'[inject] macOS DMG config → title={app_name}, app={mac_binary}.app')
+              # iOS Info.plist — CFBundleDisplayName + CFBundleName
+              p = Path('ios/Runner/Info.plist')
+              if p.exists():
+                  txt = p.read_text()
+                  txt = re.sub(
+                      r'(<key>CFBundleName</key>\s*<string>)[^<]*(</string>)',
+                      rf'\g<1>{app_name}\g<2>', txt)
+                  # Add CFBundleDisplayName if missing, or replace existing
+                  if 'CFBundleDisplayName' in txt:
+                      txt = re.sub(
+                          r'(<key>CFBundleDisplayName</key>\s*<string>)[^<]*(</string>)',
+                          rf'\g<1>{app_name}\g<2>', txt)
+                  else:
+                      txt = txt.replace(
+                          '<key>CFBundleName</key>',
+                          f'<key>CFBundleDisplayName</key>\n\t<string>{app_name}</string>\n\t<key>CFBundleName</key>')
+                  p.write_text(txt)
+                  print(f'[inject] iOS CFBundleName/DisplayName → {app_name}')
+              # Linux CMakeLists.txt（CMake 不支持空格/特殊字符作为 target 名，与 Windows 处理一致）
+              linux_binary = re.sub(r'[\s/\\:*?"<>|]+', '_', app_name)
+              linux_binary = re.sub(r'[^\x00-\x7F]+', '', linux_binary)   # 去掉中文等非 ASCII
+              linux_binary = re.sub(r'[^a-zA-Z0-9_-]+', '_', linux_binary).strip('_') or 'apex'
+              p = Path('linux/CMakeLists.txt')
+              if p.exists():
+                  p.write_text(re.sub(
+                      r'set\(BINARY_NAME\s+"[^"]*"\)',
+                      f'set(BINARY_NAME "{linux_binary}")', p.read_text()
+                  ))
+                  print(f'[inject] Linux BINARY_NAME → {linux_binary}')
+              # Linux packaging configs (deb/rpm/appimage) — display_name 控制桌面图标名
+              for pkg_type in ['deb', 'rpm', 'appimage']:
+                  p = Path(f'linux/packaging/{pkg_type}/make_config.yaml')
+                  if p.exists():
+                      import yaml as _yaml_linux
+                      cfg = _yaml_linux.safe_load(p.read_text()) or {}
+                      cfg['display_name'] = app_name
+                      if 'generic_name' in cfg:
+                          cfg['generic_name'] = app_name
+                      # Update keywords list
+                      if 'keywords' in cfg and isinstance(cfg['keywords'], list):
+                          cfg['keywords'] = [app_name] + [k for k in cfg['keywords'] if k != 'Apex']
+                      p.write_text(_yaml_linux.dump(cfg, default_flow_style=False, allow_unicode=True))
+                      print(f'[inject] Linux {pkg_type} display_name → {app_name}')
+              # distribute_options.yaml（控制输出文件名 + RPM Name）
+              # RPM 的 Name 字段不支持非 ASCII，仅 Linux 构建用拼音
+              p = Path('distribute_options.yaml')
+              if p.exists():
+                  import yaml as _yaml
+                  opts = _yaml.safe_load(p.read_text()) or {}
+                  target_plat = os.environ.get('TARGET_PLATFORM', '')
+                  has_non_ascii = any(ord(c) > 127 for c in app_name)
+                  if target_plat == 'linux' and has_non_ascii:
+                      from pypinyin import lazy_pinyin
+                      dist_name = ''.join(lazy_pinyin(app_name)) or 'apex'
+                  else:
+                      dist_name = app_name
+                  opts['app_name'] = dist_name
+                  p.write_text(_yaml.dump(opts, default_flow_style=False, allow_unicode=True))
+                  print(f'[inject] distribute_options.yaml app_name → {dist_name}')
+              # lib/common/constant.dart（应用内名称、窗口标题）
+              p = Path('lib/common/constant.dart')
+              if p.exists():
+                  txt = p.read_text(encoding='utf-8')
+                  txt = re.sub(r'(const appName\s*=\s*")[^"]*(")', rf'\g<1>{app_name}\g<2>', txt)
+                  # appNameEn 用于 User-Agent，必须 ASCII；中文名 → 用 bin_prefix 或默认 Apex
+                  en_name = re.sub(r'[^a-zA-Z0-9]+', '', app_name) or 'Apex'
+                  txt = re.sub(r'(const appNameEn\s*=\s*")[^"]*(")', rf'\g<1>{en_name}\g<2>', txt)
+                  p.write_text(txt, encoding='utf-8')
+                  print(f'[inject] constant.dart appName → {app_name}, appNameEn → {en_name}')
+
+              # ── 2. 重命名核心二进制文件前缀 ──────────────────
+              # 英文名 → 用作文件前缀；含非 ASCII（如中文）→ 默认 Apex
+              bin_prefix = re.sub(r'[^a-zA-Z0-9]+', '', app_name)
+              if not bin_prefix or bin_prefix != re.sub(r'[\s/\\:*?"<>|]+', '', app_name):
+                  bin_prefix = 'Apex'
+              if bin_prefix != 'Apex':
+                  _rename_map = {
+                      'ApexCore': f'{bin_prefix}Core',
+                      'ApexHelperService': f'{bin_prefix}HelperService',
+                  }
+                  # constant.dart：helperService 名和 socket 路径
+                  p = Path('lib/common/constant.dart')
+                  if p.exists():
+                      txt = p.read_text(encoding='utf-8')
+                      txt = re.sub(r'(const appHelperService\s*=\s*")[^"]*(")',
+                                   rf'\g<1>{bin_prefix}HelperService\g<2>', txt)
+                      txt = re.sub(r'/tmp/ApexSocket_', f'/tmp/{bin_prefix}Socket_', txt)
+                      p.write_text(txt, encoding='utf-8')
+                  # path.dart：核心文件名
+                  p = Path('lib/common/path.dart')
+                  if p.exists():
+                      txt = p.read_text(encoding='utf-8')
+                      txt = txt.replace('ApexCore', f'{bin_prefix}Core')
+                      p.write_text(txt, encoding='utf-8')
+                  # setup.dart
+                  p = Path('setup.dart')
+                  if p.exists():
+                      txt = p.read_text(encoding='utf-8')
+                      txt = txt.replace('"ApexCore"', f'"{bin_prefix}Core"')
+                      txt = txt.replace('"ApexHelperService', f'"{bin_prefix}HelperService')
+                      p.write_text(txt, encoding='utf-8')
+                  # windows/CMakeLists.txt
+                  p = Path('windows/CMakeLists.txt')
+                  if p.exists():
+                      txt = p.read_text(encoding='utf-8')
+                      for old, new in _rename_map.items():
+                          txt = txt.replace(f'{old}.exe', f'{new}.exe')
+                      p.write_text(txt, encoding='utf-8')
+                  # linux/CMakeLists.txt
+                  p = Path('linux/CMakeLists.txt')
+                  if p.exists():
+                      txt = p.read_text(encoding='utf-8')
+                      txt = txt.replace('ApexCore', f'{bin_prefix}Core')
+                      p.write_text(txt, encoding='utf-8')
+                  # inno_setup.iss
+                  for iss in Path('.').rglob('inno_setup.iss'):
+                      txt = iss.read_text(encoding='utf-8')
+                      for old, new in _rename_map.items():
+                          txt = txt.replace(f'{old}.exe', f'{new}.exe')
+                      iss.write_text(txt, encoding='utf-8')
+                  # services/helper windows.rs（SERVICE_NAME）
+                  p = Path('services/helper/src/service/windows.rs')
+                  if p.exists():
+                      txt = p.read_text(encoding='utf-8')
+                      txt = txt.replace('ApexHelperService', f'{bin_prefix}HelperService')
+                      p.write_text(txt, encoding='utf-8')
+                  # macOS project.pbxproj —— 核 + helper 两个二进制引用都要跟品牌改名
+                  # (CopyFiles 段的 ApexCore / ApexHelperService PBXFileReference)。
+                  p = Path('macos/Runner.xcodeproj/project.pbxproj')
+                  if p.exists():
+                      txt = p.read_text(encoding='utf-8')
+                      for old, new in _rename_map.items():
+                          txt = txt.replace(old, new)
+                      p.write_text(txt, encoding='utf-8')
+                  # 重命名 libclash 下的预编译二进制
+                  for d in Path('libclash').glob('*'):
+                      if d.is_dir():
+                          for old, new in _rename_map.items():
+                              for ext in ['', '.exe']:
+                                  src = d / f'{old}{ext}'
+                                  if src.exists():
+                                      src.rename(d / f'{new}{ext}')
+                                      print(f'[inject] 重命名: {src.name} → {new}{ext}')
+                  print(f'[inject] 二进制前缀 → {bin_prefix}')
+
+          # ── 3. 替换版本号 ───────────────────────────────────
+          ver = env('APP_VERSION')
+          if ver:
+              # 【版本号归一化】pub 要求 version 主体必须是 X.Y.Z（三段整数）。运营在向导里
+              # 常填 "1.2"（两段）、"1"、甚至带非数字 → flutter pub get 直接
+              # "Invalid version number: Could not parse 1.2+..." 整个 build 报销（实测崩过）。
+              # 这里把主体补/截成恰好三段整数（非数字段当 0），保留 +buildNumber 部分。
+              _plus = ver.split('+', 1)
+              _nums = []
+              for _part in _plus[0].split('.'):
+                  _d = ''.join(_c for _c in _part if _c.isdigit())
+                  _nums.append(int(_d) if _d else 0)
+              while len(_nums) < 3:
+                  _nums.append(0)
+              _base = '.'.join(str(_n) for _n in _nums[:3])
+              _norm = _base + (('+' + _plus[1]) if len(_plus) > 1 else '')
+              if _norm != ver:
+                  print(f'[inject] 版本号归一化: {ver} → {_norm}')
+                  ver = _norm
+              p = Path('pubspec.yaml')
+              txt = p.read_text()
+              # Flutter 要求 version: X.Y.Z+buildNumber，buildNumber 即 Android versionCode。
+              # Android 判断"哪个版本新"看的是 versionCode（整数）不是 versionName 字符串。
+              # 旧实现固定补 "+1" → 每次打包 versionCode 都是 1 → 用户从旧版升级新版被拒
+              # ("已安装更高版本"，或显示为相同版本无法覆盖)。
+              # 改用当前 UTC 秒级时间戳当 buildNumber，保证每次 CI 跑 versionCode 单调递增。
+              if '+' in ver:
+                  pubspec_ver = ver
+              else:
+                  build_no = int(time.time())   # 2025-11+ 起约 17 亿，int32 上限 21 亿，仍安全
+                  pubspec_ver = f'{ver}+{build_no}'
+              txt = re.sub(r'^(version:\s*)\S+', rf'\g<1>{pubspec_ver}',
+                           txt, flags=re.MULTILINE)
+              p.write_text(txt)
+              print(f'[inject] pubspec version → {pubspec_ver}')
+
+              # 同步版本号到 release_config_plaintext.json
+              release_ver = ver.split('+')[0]  # 纯版本号，不含 buildNumber
+              cfg_file = Path('release_config_plaintext.json')
+              if cfg_file.exists():
+                  cfg_txt = cfg_file.read_text(encoding='utf-8')
+                  cfg_txt = re.sub(r'"version"\s*:\s*"[^"]*"',
+                                   f'"version": "{release_ver}"', cfg_txt)
+                  cfg_file.write_text(cfg_txt, encoding='utf-8')
+                  print(f'[inject] release_config version → {release_ver}')
+
+          # ── 3b. 替换默认 UA ────────────────────────────────
+          default_ua = env('DEFAULT_UA')
+          if default_ua:
+              p = Path('lib/common/package.dart')
+              if p.exists():
+                  txt = p.read_text(encoding='utf-8')
+                  txt = re.sub(
+                      r'''String get ua => ["'][^"']*["']''',
+                      f'String get ua => "{default_ua}"',
+                      txt
+                  )
+                  p.write_text(txt, encoding='utf-8')
+                  print(f'[inject] default UA → {default_ua}')
+
+          # ── 4. 注入 panel_type 到 assets/config/config.yaml ──
+          # 注意：OSS URL 不写入 config.yaml（安装目录明文可见），
+          # 仅通过 dart-define 编译注入（二进制内嵌，不可直接读取）
+          panel_type = env('PANEL_TYPE') or 'xboard'
+          p = Path('assets/config/config.yaml')
+          if p.exists():
+              txt = p.read_text(encoding='utf-8')
+              txt = re.sub(r'^panel_type:\s*\S+', f'panel_type: {panel_type}', txt, flags=re.MULTILINE)
+              p.write_text(txt, encoding='utf-8')
+              print(f'[inject] config.yaml panel_type → {panel_type}')
+
+          # ── 4b. 注入 api_prefix 到 assets/config/config.yaml ──
+          # Git Bash (MSYS2) 会把 /api/v1 转换为 C:/Program Files/Git/api/v1
+          # 需要检测并还原
+          api_prefix = env('API_PREFIX') or '/api/v1'
+          if re.match(r'^[A-Z]:[/\\]', api_prefix):
+              original = api_prefix
+              # 去掉盘符和 Git 安装路径前缀，还原为 /xxx/vN 形式
+              api_prefix = re.sub(r'^[A-Z]:[/\\](?:Program Files[/\\]Git)?', '', api_prefix).replace('\\', '/')
+              if not api_prefix.startswith('/'):
+                  api_prefix = '/' + api_prefix
+              print(f'[inject] ⚠️ api_prefix 被 MSYS 路径转换: {original} → 已修正为: {api_prefix}')
+          p = Path('assets/config/config.yaml')
+          if p.exists():
+              txt = p.read_text(encoding='utf-8')
+              # 替换已有的 api_prefix（含注释掉的）
+              if re.search(r'^#?\s*api_prefix:', txt, flags=re.MULTILINE):
+                  txt = re.sub(r'^#?\s*api_prefix:\s*\S+', f'api_prefix: {api_prefix}', txt, flags=re.MULTILINE)
+              else:
+                  # 不存在则追加到 panel_type 后
+                  txt = re.sub(r'^(panel_type:\s*\S+)', rf'\1\napi_prefix: {api_prefix}', txt, flags=re.MULTILINE)
+              p.write_text(txt, encoding='utf-8')
+              print(f'[inject] config.yaml api_prefix → {api_prefix}')
+
+          # ── 5. 替换应用图标 ─────────────────────────────────
+          # 仅在用户上传了自定义 Logo 时才处理 adaptive icon
+          # 不再无条件删除 adaptive icon 文件，保留原始结构
+          import glob as _glob
+
+          logo_url = env('APP_LOGO_URL')
+          if logo_url:
+              try:
+                  import json as _json
+                  import time as _time
+                  from PIL import Image
+
+                  # ── Logo 下载：带重试 + Content-Type 校验 + 10MB 上限 ─────
+                  # 之前一次失败就 sys.exit(1) 整 build 报销。常见误伤：
+                  #   - 图床瞬时 5xx / DNS 抽风 / 网络抖动
+                  #   - CDN 返回 200 + HTML 错误页（PIL 才在 Image.open 抛错）
+                  #   - 配错的图床给个超大文件让 runner OOM
+                  # 重试 + Content-Type 检查 + 大小硬上限。
+                  #
+                  # 退避刻意拉长（2026-09-09 runs/34362593929）：原来是 1s/2s，三次
+                  # 尝试全挤在 ~63s 内（30s 超时 + 1s + 30s + 2s）。那次 android mobile
+                  # 连吃三个 30s 读超时挂掉，而同一次构建里另外 4 个平台都在几秒内下完
+                  # —— 图床（免费的 i.ibb.co，无 SLA）坏了一小段时间，短退避等于三次
+                  # 都撞在同一个坏窗口里。现在 4 次、退避 5s/15s/30s，最后一次落在
+                  # ~140s，能扛过 2 分多钟的抽风。
+                  # 真 404 / 真错误图片仍然重试完就 fail-fast（不能静默发默认图标的包）。
+                  _LOGO_MAX_BYTES = 10 * 1024 * 1024  # 10MB
+                  _LOGO_RETRIES = 4
+                  _LOGO_BACKOFF = (5, 15, 30)   # 第 1/2/3 次失败后各等多久
+
+                  def _download_logo(url):
+                      last_exc = None
+                      for attempt in range(_LOGO_RETRIES):
+                          try:
+                              req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                              with urllib.request.urlopen(req, timeout=30) as r:
+                                  ctype = (r.headers.get('Content-Type') or '').lower()
+                                  if ctype and 'image' not in ctype and 'octet-stream' not in ctype:
+                                      raise ValueError(f'非图片响应 (Content-Type={ctype!r})，可能是 CDN 错误页')
+                                  clen = int(r.headers.get('Content-Length') or 0)
+                                  if clen and clen > _LOGO_MAX_BYTES:
+                                      raise ValueError(f'图片大小 {clen} 超过 {_LOGO_MAX_BYTES} 上限')
+                                  data = r.read(_LOGO_MAX_BYTES + 1)
+                                  if len(data) > _LOGO_MAX_BYTES:
+                                      raise ValueError(f'图片大小超过 {_LOGO_MAX_BYTES} 上限（streaming）')
+                              return Image.open(io.BytesIO(data)).convert('RGBA')
+                          except (urllib.error.URLError, ConnectionError, ValueError, OSError) as e:
+                              last_exc = e
+                              if attempt < _LOGO_RETRIES - 1:
+                                  wait = _LOGO_BACKOFF[min(attempt, len(_LOGO_BACKOFF) - 1)]
+                                  print(f'[inject] Logo 下载第 {attempt + 1}/{_LOGO_RETRIES} 次失败: {e}，{wait}s 后重试')
+                                  _time.sleep(wait)
+                      raise last_exc if last_exc else RuntimeError('logo download failed')
+
+                  img = _download_logo(logo_url)
+                  print(f'[inject] Logo 下载成功: {img.size}')
+
+                  # ── Android mipmap ──────────────────────────
+                  # Android 图标不加圆角（系统启动器会自动做 mask 裁切）
+                  # 仅做 resize + 合成白底（防止透明背景在某些启动器上显示为纯黑）
+                  def _android_icon(src, size):
+                      ri = src.resize((size, size), Image.LANCZOS)
+                      if ri.mode == 'RGBA':
+                          bg = Image.new('RGBA', ri.size, (255, 255, 255, 255))
+                          bg.paste(ri, mask=ri.split()[3])
+                          return bg.convert('RGB')
+                      return ri.convert('RGB')
+
+                  # 用户上传了自定义 Logo 时：
+                  # 1. 删除 adaptive icon XML（mipmap-anydpi-v26），让系统回退到普通 mipmap
+                  # 2. 删除 foreground 图层文件
+                  # 3. 删除 ic_launcher_background 颜色资源
+                  # 这样 Android 会直接使用我们替换的 webp/png 图标
+                  for xml_f in _glob.glob('android/app/src/main/res/mipmap-anydpi*/ic_launcher*.xml'):
+                      Path(xml_f).unlink()
+                      print(f'[inject] 删除 adaptive XML: {xml_f}')
+                  for fg_f in _glob.glob('android/app/src/main/res/mipmap-*/ic_launcher_foreground.*'):
+                      Path(fg_f).unlink()
+                      print(f'[inject] 删除 foreground: {fg_f}')
+                  bg_xml = Path('android/app/src/main/res/values/ic_launcher_background.xml')
+                  if bg_xml.exists():
+                      bg_xml.unlink()
+                      print(f'[inject] 删除 ic_launcher_background.xml')
+                  # 修复 values-v27/styles.xml 中对已删除颜色资源的引用
+                  # 同时移除 windowSplashScreenAnimatedIcon——Android 12+ 的 splash API
+                  # 会把这个 icon 强制放大 1.5× 并裁成内圆，自定义 logo 没 safe zone
+                  # 就被切掉边角；删掉这一行让 splash 只显示背景色，干净。
+                  v27_styles = Path('android/app/src/main/res/values-v27/styles.xml')
+                  if v27_styles.exists():
+                      txt = v27_styles.read_text()
+                      changed = False
+                      if '@color/ic_launcher_background' in txt:
+                          txt = txt.replace('@color/ic_launcher_background', '#FAFAFA')
+                          changed = True
+                          print('[inject] 修复 values-v27/styles.xml → 硬编码 #FAFAFA')
+                      # 删 splash icon 行（多种缩进/换行写法都能命中）
+                      new_txt = re.sub(
+                          r'\s*<item name="android:windowSplashScreenAnimatedIcon"[^>]*>[^<]*</item>',
+                          '',
+                          txt,
+                      )
+                      if new_txt != txt:
+                          txt = new_txt
+                          changed = True
+                          print('[inject] 移除 windowSplashScreenAnimatedIcon → splash 只显示背景色，避免 logo 被裁')
+                      if changed:
+                          v27_styles.write_text(txt)
+
+                  for folder, size in {
+                      'mipmap-mdpi': 48, 'mipmap-hdpi': 72,
+                      'mipmap-xhdpi': 96, 'mipmap-xxhdpi': 144,
+                      'mipmap-xxxhdpi': 192,
+                  }.items():
+                      base = Path(f'android/app/src/main/res/{folder}')
+                      if not base.exists():
+                          continue
+                      ri = _android_icon(img, size)
+                      replaced = False
+                      for stem in ['ic_launcher', 'ic_launcher_round']:
+                          for ext, fmt in [('webp', 'WEBP'), ('png', 'PNG')]:
+                              f = base / f'{stem}.{ext}'
+                              if f.exists():
+                                  ri.save(f, format=fmt)
+                                  print(f'[inject] Android icon: {f}')
+                                  replaced = True
+                      if not replaced:
+                          ri.save(base / 'ic_launcher.webp', format='WEBP')
+                          print(f'[inject] Android icon (新建): {base}/ic_launcher.webp')
+
+                  # Android Google Play 封面图
+                  ps = Path('android/app/src/main/ic_launcher-playstore.png')
+                  if ps.exists():
+                      img.resize((512, 512), Image.LANCZOS).save(ps)
+                      print(f'[inject] Android playstore icon: {ps}')
+
+                  # ── Android TV banner (320x180) ────────────
+                  tv_banner = Path('android/app/src/main/res/mipmap-xhdpi/ic_banner.png')
+                  if tv_banner.exists():
+                      bw, bh = 320, 180
+                      banner_img = Image.new('RGBA', (bw, bh), (250, 250, 250, 255))
+                      icon_h = int(bh * 0.6)
+                      icon_resized = img.resize((icon_h, icon_h), Image.LANCZOS)
+                      x = (bw - icon_h) // 2
+                      y = (bh - icon_h) // 2
+                      banner_img.paste(icon_resized, (x, y), icon_resized if icon_resized.mode == 'RGBA' else None)
+                      banner_img.convert('RGB').save(tv_banner, format='PNG')
+                      print(f'[inject] Android TV banner: {tv_banner}')
+
+                  # ── Windows ICO ─────────────────────────────
+                  # rc.exe 对小尺寸 PNG 格式支持有缺陷，必须用 BMP 格式
+                  # 仅 256x256 使用 PNG 压缩（ICO 规范推荐）
+                  def _build_ico(src_img, out_path, sizes):
+                      """生成 rc.exe 兼容的 ICO：小尺寸用 BMP，256 用 PNG"""
+                      import struct as _st
+                      entries = []
+                      for s in sizes:
+                          ri = src_img.resize((s, s), Image.LANCZOS).convert('RGBA')
+                          if s >= 256:
+                              buf = io.BytesIO()
+                              ri.save(buf, format='PNG')
+                              entries.append((s, buf.getvalue()))
+                          else:
+                              # BMP DIB: BITMAPINFOHEADER + pixel data (bottom-up BGRA) + AND mask
+                              w, h = ri.size
+                              pixels = ri.load()
+                              # BITMAPINFOHEADER (40 bytes)
+                              bih = _st.pack('<IiiHHIIiiII',
+                                  40,        # biSize
+                                  w,         # biWidth
+                                  h * 2,     # biHeight (doubled: XOR + AND)
+                                  1,         # biPlanes
+                                  32,        # biBitCount
+                                  0,         # biCompression (BI_RGB)
+                                  0,         # biSizeImage (can be 0 for BI_RGB)
+                                  0, 0,      # biXPelsPerMeter, biYPelsPerMeter
+                                  0, 0,      # biClrUsed, biClrImportant
+                              )
+                              # XOR bitmap (bottom-up, BGRA)
+                              xor_data = bytearray()
+                              for y in range(h - 1, -1, -1):
+                                  for x in range(w):
+                                      r, g, b, a = pixels[x, y]
+                                      xor_data += bytes([b, g, r, a])
+                              # AND mask (1bpp, bottom-up, rows padded to 4 bytes)
+                              and_row_bytes = ((w + 31) // 32) * 4
+                              and_data = bytes(and_row_bytes * h)
+                              entries.append((s, bih + bytes(xor_data) + and_data))
+                      # Write ICO file
+                      count = len(entries)
+                      header = _st.pack('<HHH', 0, 1, count)
+                      data_offset = 6 + count * 16
+                      directory = b''
+                      image_data = b''
+                      for s, raw in entries:
+                          w_byte = 0 if s >= 256 else s
+                          h_byte = 0 if s >= 256 else s
+                          directory += _st.pack('<BBBBHHII',
+                              w_byte, h_byte, 0, 0, 1, 32, len(raw), data_offset)
+                          data_offset += len(raw)
+                          image_data += raw
+                      Path(out_path).write_bytes(header + directory + image_data)
+
+                  ico = Path('windows/runner/resources/app_icon.ico')
+                  if ico.parent.exists():
+                      ico_sizes = [16, 20, 24, 32, 40, 48, 64, 128, 256]
+                      _build_ico(img, str(ico), ico_sizes)
+                      print(f'[inject] Windows ICO ({len(ico_sizes)} 尺寸, BMP+PNG): {ico}')
+
+                  # ── macOS appiconset ────────────────────────
+                  # 用 Contents.json 里的 size/scale 字段计算像素尺寸，不依赖文件名格式
+                  appiconset = Path('macos/Runner/Assets.xcassets/AppIcon.appiconset')
+                  if appiconset.exists():
+                      contents_file = appiconset / 'Contents.json'
+                      if contents_file.exists():
+                          data = _json.loads(contents_file.read_text())
+                          processed = set()
+                          for item in data.get('images', []):
+                              fname = item.get('filename', '')
+                              if not fname or fname in processed:
+                                  continue
+                              processed.add(fname)
+                              size_str  = item.get('size', '')    # e.g. "16x16"
+                              scale_str = item.get('scale', '1x') # e.g. "2x"
+                              try:
+                                  base_px = int(size_str.split('x')[0])
+                                  scale   = int(scale_str.rstrip('x'))
+                                  px = base_px * scale
+                                  img.resize((px, px), Image.LANCZOS).save(appiconset / fname)
+                                  print(f'[inject] macOS icon: {fname} ({px}x{px})')
+                              except Exception as ex:
+                                  print(f'[inject] ⚠️  macOS icon {fname} 跳过: {ex}')
+                      print(f'[inject] macOS 图标替换完成')
+
+                  # ── iOS appiconset ─────────────────────────
+                  ios_appiconset = Path('ios/Runner/Assets.xcassets/AppIcon.appiconset')
+                  if ios_appiconset.exists():
+                      contents_file = ios_appiconset / 'Contents.json'
+                      if contents_file.exists():
+                          data = _json.loads(contents_file.read_text())
+                          processed = set()
+                          for item in data.get('images', []):
+                              fname = item.get('filename', '')
+                              if not fname or fname in processed:
+                                  continue
+                              processed.add(fname)
+                              size_str  = item.get('size', '')
+                              scale_str = item.get('scale', '1x')
+                              try:
+                                  base_px = int(size_str.split('x')[0])
+                                  scale   = int(scale_str.rstrip('x'))
+                                  px = base_px * scale
+                                  img.resize((px, px), Image.LANCZOS).save(ios_appiconset / fname)
+                                  print(f'[inject] iOS icon: {fname} ({px}x{px})')
+                              except Exception as ex:
+                                  print(f'[inject] ⚠️  iOS icon {fname} 跳过: {ex}')
+                      print(f'[inject] iOS 图标替换完成')
+
+                  # ── assets/images/ ──────────────────────────
+                  assets_img = Path('assets/images')
+                  if assets_img.exists():
+                      img_1024 = img.resize((1024, 1024), Image.LANCZOS)
+                      for name in ['icon.png', 'icon_black.png', 'icon_white.png']:
+                          p = assets_img / name
+                          if p.exists():
+                              img_1024.save(p)
+                              print(f'[inject] assets/images: {p}')
+                      _tray_ico_sizes = [16, 20, 24, 32, 40, 48, 64, 128, 256]
+                      for name in ['icon.ico', 'icon_black.ico', 'icon_white.ico']:
+                          p = assets_img / name
+                          if p.exists():
+                              _build_ico(img, str(p), _tray_ico_sizes)
+                              print(f'[inject] assets/images ICO: {p}')
+
+                      # ── macOS tray icon（彩色小图标，非 template）──
+                      # macOS 菜单栏用 isTemplate=false + 彩色图标
+                      # 缩放到 44x44 并加圆角，透明背景
+                      tray_p = assets_img / 'tray_icon.png'
+                      try:
+                          tray_size = 44
+                          tray_src = img.resize((tray_size, tray_size), Image.LANCZOS).convert('RGBA')
+                          # 创建圆角蒙版
+                          from PIL import ImageDraw
+                          mask = Image.new('L', (tray_size, tray_size), 0)
+                          md = ImageDraw.Draw(mask)
+                          radius = tray_size // 4  # 11px 圆角
+                          md.rounded_rectangle([0, 0, tray_size - 1, tray_size - 1], radius=radius, fill=255)
+                          # 合成：透明背景 + 圆角 logo
+                          tray_img = Image.new('RGBA', (tray_size, tray_size), (0, 0, 0, 0))
+                          tray_img.paste(tray_src, mask=mask)
+                          tray_img.save(tray_p)
+                          print(f'[inject] macOS tray icon: {tray_p}')
+                      except Exception as ex:
+                          print(f'[inject] ⚠️  tray_icon 生成跳过: {ex}')
+
+                  print(f'[inject] ✅ 图标替换全部完成')
+              except Exception as e:
+                  import traceback, sys
+                  print(f'[inject] ❌ 图标替换失败: {e}')
+                  traceback.print_exc()
+                  sys.exit(1)  # 图标替换失败时中止构建，防止发布默认图标
+
+          PYEOF
+
+      # ── 3. Android 签名配置（可选）──────────────────────────
+      - name: Setup Android signing
+        if: matrix.platform == 'android'
+        env:
+          KEYSTORE:       ${{ secrets.KEYSTORE }}
+          KEY_ALIAS:      ${{ secrets.KEY_ALIAS }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD:   ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE" ]; then
+            echo "$KEYSTORE" | base64 --decode > android/app/keystore.jks
+            echo "keyAlias=$KEY_ALIAS"           >> android/local.properties
+            echo "storePassword=$STORE_PASSWORD" >> android/local.properties
+            echo "keyPassword=$KEY_PASSWORD"     >> android/local.properties
+          fi
+
+      # ── 4. Windows 构建依赖 ──────────────────────────────────
+      - name: Setup Windows build environment
+        if: matrix.platform == 'windows'
+        run: |
+          if ! command -v jq &>/dev/null; then
+            choco install jq -y --no-progress && \
+              echo "/c/ProgramData/chocolatey/bin" >> $GITHUB_PATH || true
+          fi
+          if ! command -v cargo &>/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            source "$HOME/.cargo/env"
+            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          fi
+          cargo --version
+          ATL_GLOB="/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/*/atlmfc/include/atlstr.h"
+          if ! ls $ATL_GLOB 1>/dev/null 2>&1; then
+            choco install visualstudio2022buildtools \
+              --package-parameters "--add Microsoft.VisualStudio.Workload.VCTools \
+                --add Microsoft.VisualStudio.Component.VC.ATL \
+                --add Microsoft.VisualStudio.Component.VC.ATLMFC \
+                --includeRecommended --quiet" \
+              -y --force || true
+          fi
+          INNO_EXE="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          if [ ! -f "$INNO_EXE" ]; then
+            choco install innosetup -y --no-progress
+          fi
+          echo "/c/Program Files (x86)/Inno Setup 6" >> $GITHUB_PATH
+
+      # ── 4b. macOS：确保 cargo（setup.dart buildHelper 编 root helper 要用）──
+      # macos-latest 预装 Rust，但显式兜底：缺则装 rustup，保证 cargo 在 PATH。
+      - name: Ensure Rust toolchain (macOS helper)
+        if: matrix.platform == 'macos'
+        run: |
+          if ! command -v cargo &>/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+            source "$HOME/.cargo/env"
+          fi
+          cargo --version
+
+      # ── 5. macOS：没有自定义 logo 时，从默认源图标生成全套 appiconset ──
+      # 有 logo 时 inject 步骤已用 PIL 替换，这里只处理无 logo 的情况
+      - name: Generate macOS icons from default source (no logo)
+        if: matrix.platform == 'macos' && (github.event_name != 'workflow_dispatch' || inputs.app_logo_url == '')
+        run: |
+          SRC="assets/images/icon.png"
+          ICONSET="macos/Runner/Assets.xcassets/AppIcon.appiconset"
+          for SIZE in 16 32 64 128 256 512 1024; do
+            sips -z $SIZE $SIZE "$SRC" --out "$ICONSET/app_icon_${SIZE}.png" > /dev/null
+          done
+          echo "macOS icons regenerated from $SRC"
+          ls -lh "$ICONSET"/*.png
+
+      # ── 5b. macOS：清除 SPM 构建缓存 + Pods + 显式 pod install ──
+      # 之前以为 cleanup + flutter pub get 就够了，但 flutter pub get **不会**
+      # 主动跑 pod install（macOS），导致 sandbox not in sync 错误持续。
+      # 解：cleanup 之后立刻在 macos/ 跑 pod install。
+      - name: Clean macOS SPM/Pods and reinstall
+        if: matrix.platform == 'macos'
+        run: |
+          # SPM 缓存
+          rm -rf macos/Runner.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
+          rm -rf macos/Runner.xcworkspace/xcshareddata/swiftpm/
+          # Pods 全清
+          rm -f  macos/Podfile.lock
+          rm -rf macos/Pods
+          # 主动 pod install (在 pubspec 加新 dep 后 sandbox 一定一致)
+          # 注：必须在 flutter pub get 之后，因为 flutter pub get 会生成 macos/Flutter/ephemeral
+          # 让 pod install 拿到 Pods 列表。
+          echo "[macos-pods] flutter pub get 在后面的 'Install dependencies' step，pod install 推迟到那之后"
+
+      # ── 6. 安装 Go ───────────────────────────────────────────
+      - name: Setup Go
+        if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      # ── 6b. Android: 显式装 NDK（绕过 AGP 自动下载的不稳定）──────
+      # 失败案例：runs/27434842730 — AGP 调 Google SDK Manager 在线拉
+      # ndk;28.0.13004108，下载到的不是 zip（HTML 错误页 / CDN 截断 /
+      # 网络抖动），ZipException 直接挂掉。
+      #
+      # 这里用 nttld/setup-ndk 提前装好同样的精确版本（与
+      # android/app/build.gradle.kts::ndkVersion 严格一致），AGP 看到本地有
+      # 就不会去 Google 拉了。同时 export ANDROID_NDK 让 setup.dart::_getCc
+      # 跨编译 libclash.so 时也用同一份 NDK，保证 mihomo go build 和 Flutter
+      # Android build 链接器一致。
+      - name: Setup Android NDK
+        if: matrix.platform == 'android' && (github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform))
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          # 跟 android/app/build.gradle.kts ndkVersion="28.0.13004108" 对齐。
+          # nttld/setup-ndk@v1 只接受 'r28' 这种 release 短码，精确版本号
+          # 28.0.13004108 返 404（runs/27492971975 验证）。下面的 patch step
+          # 修 r28 的 broken wrapper（runs/27492755820 失败原因）。
+          ndk-version: r28
+          local-cache: true
+          add-to-path: false
+
+      # NDK r28 上游 release 整个 bin 目录的 versioned symlink 都缺：
+      #   .../bin/clang        ← 缺，只有 clang-19/20
+      #   .../bin/ld.lld       ← 缺（runs/27493315381 失败原因）
+      # 历次失败:
+      #   27492755820: clang missing
+      #   27492971975: 精确版本号 setup-ndk 返 404
+      #   27493315381: ld.lld missing
+      # 一次性扫所有 LLVM 系工具补 symlink，避免再被新缺失文件咬。
+      - name: Patch NDK r28 broken symlinks (workaround upstream release bug)
+        if: matrix.platform == 'android' && (github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform))
+        run: |
+          NDK="${{ steps.setup-ndk.outputs.ndk-path }}"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          # 通用 patch 函数：拿 versioned binary 补一个无后缀 symlink
+          # ${BIN}/clang -> clang-19；${BIN}/ld.lld -> ld.lld-19；etc.
+          #
+          # 用 -e 而不是 -f/-L：-L 对 dangling symlink 也返 true，会误判
+          # 为"已存在"跳过 patch（runs/27499847066 wrapper 仍报 clang missing
+          # 的原因）。-e follow symlink，dangling 返 false → 走 patch 分支
+          # 强制 ln -sf 覆盖。
+          # 诊断先打一次：看 NDK BIN 里到底有什么 clang / lld 系 binary，
+          # 失败时直接看到真实文件名而不是空猜。
+          echo "[ndk-patch] BIN dir: $BIN"
+          echo "[ndk-patch] === clang/lld 系 binary 实际清单 ==="
+          ls -la "$BIN" 2>/dev/null | grep -E "(clang|lld|llvm-)" | head -40 || true
+          echo "[ndk-patch] === end 清单 ==="
+
+          # patch_symlink stem [alias_fallback]
+          # 找 ${BIN}/${stem}：
+          #   - 存在且 target valid → 跳过
+          #   - 不存在 / dangling → 找 ${stem}-NUM，然后 ${stem}.NUM，最后 alias_fallback
+          patch_symlink() {
+            local stem="$1"
+            local alias_fb="${2:-}"   # 可选：LLVM 别名入口（如 lld）
+            if [ -e "$BIN/$stem" ]; then
+              echo "[ndk-patch] $stem 已存在（target valid），跳过"
+              return 0
+            fi
+            rm -f "$BIN/$stem"
+            # set -e -o pipefail 下 grep 无匹配返 1，会被 pipefail 提到管道杀步骤
+            # 用 subshell + || true 兜底
+            local actual=$( (ls "$BIN" 2>/dev/null | grep -E "^${stem}-[0-9]+$" | head -1) || true )
+            if [ -z "$actual" ]; then
+              actual=$( (ls "$BIN" 2>/dev/null | grep -E "^${stem}\\.[0-9]+$" | head -1) || true )
+            fi
+            if [ -z "$actual" ] && [ -n "$alias_fb" ] && [ -e "$BIN/$alias_fb" ]; then
+              # LLVM 约定：ld.lld / ld64.lld / lld-link / wasm-ld 都是 lld 的
+              # 别名入口（通过 argv[0] 路由），没有独立 versioned binary。
+              # clang++ 也是 clang 的别名入口。
+              actual="$alias_fb"
+              echo "[ndk-patch] $stem 用 LLVM 别名入口 → $alias_fb"
+            fi
+            if [ -z "$actual" ]; then
+              echo "[ndk-patch] ⚠️  找不到 ${stem}-* / ${stem}.NUM / 别名 binary，跳过"
+              return 0
+            fi
+            ln -sf "$actual" "$BIN/$stem"
+            echo "[ndk-patch] ✅ linked $stem -> $actual"
+          }
+
+          # 顺序很关键：lld 先 patch（让 ld.lld 等别名能 fallback 到它）
+          patch_symlink lld
+          # clang 也先 patch（让 clang++ 能 fallback）
+          patch_symlink clang
+          patch_symlink clang++ clang
+          # lld 别名入口（runs/27501260716 真错：clang 报 ld.lld 不存在）
+          patch_symlink ld.lld lld
+          patch_symlink ld64.lld lld
+          patch_symlink lld-link lld
+          patch_symlink wasm-ld lld
+          patch_symlink llvm-ar
+          patch_symlink llvm-ranlib
+          patch_symlink llvm-strip
+          patch_symlink llvm-objcopy
+          patch_symlink llvm-objdump
+
+          # 验证：armv7a-linux-androideabi21-clang 这个 wrapper 现在能跑了吗
+          WRAPPER="$BIN/armv7a-linux-androideabi21-clang"
+          if [ -f "$WRAPPER" ]; then
+            echo "[ndk-patch] 测试 wrapper: $WRAPPER --version"
+            "$WRAPPER" --version || echo "[ndk-patch] ⚠️  wrapper 仍有问题"
+          fi
+
+      - name: Export ANDROID_NDK
+        if: matrix.platform == 'android' && (github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform))
+        run: |
+          # setup.dart::_getCc 读 ANDROID_NDK（无 _HOME/_ROOT 后缀），
+          # nttld/setup-ndk 默认只设 ANDROID_NDK_HOME——补一行让 setup.dart 看到
+          NDK_PATH="${{ steps.setup-ndk.outputs.ndk-path }}"
+          echo "ANDROID_NDK=$NDK_PATH" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK_PATH" >> "$GITHUB_ENV"
+          echo "[setup-ndk] ANDROID_NDK=$NDK_PATH"
+
+      # ── 6c2. Android: JDK(gomobile bind 出 .aar 的 Java 部分需 javac,pin temurin 17
+      #         与 build-android-core.yml 一致,不靠 runner 预装的不确定版本)──
+      - name: Setup JDK (android)
+        if: matrix.platform == 'android' && (github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform))
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ── 6d. Android: 安装 gomobile ───────────────────────────
+      # 剥离 FlClash 后,安卓核不再是 setup.dart 直接 cc 编 libclash.so,而是
+      # build-android-core.sh 用 `gomobile bind` 出 android/app/libs/mihomo.aar。
+      # runner 不预装 gomobile → 不装则 `gomobile: command not found`,android 腿必挂。
+      - name: Install gomobile (android)
+        if: matrix.platform == 'android' && (github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform))
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          gomobile init
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # ── 7. 安装 Flutter ──────────────────────────────────────
+      - name: Setup Flutter
+        if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
+        uses: subosito/flutter-action@v2
+        with:
+          # 锁定版本,勿改回浮动 stable:3.47.0 的新 Dart 会产出 dot-shorthand
+          # AST 节点,旧 analyzer/freezed 的 ThrowingAstVisitor 缺
+          # visitDotShorthandPropertyAccess 实现 → boardsdk 代码生成崩溃;
+          # macOS 侧同版本还会导致 pod FlutterMacOS 版本不兼容。3.44.9 全绿。
+          flutter-version: '3.44.9'
+          channel: 'stable'
+          cache: true
+
+      # ── 8. Windows: 安装 flutter_distributor(仅旧 ref 需要)──────
+      # 新版 setup.dart 的 windows 分支直接 flutter build,不再用 distributor,
+      # 这步对新 tag 是多余的。但**旧 tag**(windows 还走 flutter_distributor
+      # --targets zip 的版本)构建时,setup.dart 裸调 `flutter_distributor`
+      # 靠 PATH 找它,而 Windows 上 pub global bin 默认不在 PATH → 必须靠这步
+      # 把 %LOCALAPPDATA%\Pub\Cache\bin 补进 PATH。保留以兜旧 ref 构建。
+      - name: Setup flutter_distributor (Windows)
+        if: matrix.platform == 'windows'
+        run: |
+          PUB_BIN="/c/Users/$(whoami)/AppData/Local/Pub/Cache/bin"
+          echo "$PUB_BIN" >> $GITHUB_PATH
+          dart pub global activate flutter_distributor
+
+      # ── 8b. Linux: 安装系统依赖 ─────────────────────────────
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update -y
+          # libsecret-1-dev: v3.7.0 起 flutter_secure_storage 用 GNOME Keyring 后端,
+          # CMake pkg_check_modules 需要 libsecret-1>=0.18.4 . jsoncpp-dev 也是该插件的依赖.
+          sudo apt-get install -y ninja-build libgtk-3-dev libwebkit2gtk-4.1-dev libsecret-1-dev libjsoncpp-dev
+
+      # ── 9. 安装项目依赖 ──────────────────────────────────────
+      - name: Install dependencies
+        if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
+        run: flutter pub get
+
+      # ── 9b. macOS: pod install（v3.6.49 加 flutter_inappwebview 后必须）──
+      # flutter pub get 不会主动跑 pod install for macOS。pubspec 加新 dep 后
+      # 必须显式 pod install，否则 sandbox not in sync with Podfile.lock。
+      - name: macOS pod install
+        if: matrix.platform == 'macos'
+        run: |
+          cd macos
+          # 优先 pod install --repo-update（拉新 spec 元数据），失败再 fallback
+          pod install --repo-update || pod install
+          echo "[macos-pods] ✅ Podfile.lock 重新生成 + Pods sandbox 同步"
+
+      # ── 10. 生成 SDK 代码 ─────────────────────────────────────
+      - name: Generate SDK code
+        if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
+        run: |
+          cd lib/sdk/boardsdk
+          flutter pub get
+          dart run build_runner build --delete-conflicting-outputs
+          cd ../../..
+
+      # ── 11. 生成主项目代码 ────────────────────────────────────
+      - name: Generate project code
+        if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      # ── 11b. 计算 MIHOMO_TAG（反风控代号）──────────────────────
+      # 留空 → 自动生成 6 位 hex（带 'apx' 前缀确保首字符是字母），让每次出包代号
+      # 不同，国产手机厂商风控扫描器难以学到固定特征签名。
+      # 用户输入 → 校验白名单字符集，写入 GITHUB_ENV 让后续 step 共享。
+      # matrix 多平台并行时**每个 platform 独立计算**——4 个 APK + Win/Mac/Linux
+      # 出来各自代号，扫描器更难关联同一来源。
+      - name: Compute MIHOMO_TAG
+        if: github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform)
+        shell: bash
+        # 【禁止把 inputs 直接内插进 run: · 2026-09-04 审计 HIGH】
+        # `${{ }}` 是在 shell 启动**之前**做文本替换的,值里带一个双引号就能越出
+        # 字符串、拼出任意命令。下面第 4 行那个 `=~ ^[A-Za-z0-9_-]+$` 校验挡不住
+        # 它 —— 注入发生在替换阶段,校验那行根本轮不到执行。
+        # 走 env: 后 shell 只看到一个普通变量,内容不再参与解析。
+        env:
+          USER_TAG_RAW: ${{ inputs.mihomo_tag }}
+        run: |
+          USER_TAG="$USER_TAG_RAW"
+          PLATFORM="${{ matrix.platform }}"
+          if [ -n "$USER_TAG" ]; then
+            # 用户显式指定 → 所有平台都用它（必须只含 [A-Za-z0-9_-] 且 ≤ 32，
+            # 与 scripts/obfuscate_mihomo.sh 校验一致）
+            if ! [[ "$USER_TAG" =~ ^[A-Za-z0-9_-]+$ ]] || [ ${#USER_TAG} -gt 32 ]; then
+              echo "❌ inputs.mihomo_tag 不合法（需 [A-Za-z0-9_-]{1,32}）: '$USER_TAG'"
+              exit 1
+            fi
+            TAG="$USER_TAG"
+            echo "[mihomo_tag] user-provided: $TAG"
+          elif [ "$PLATFORM" = "android" ]; then
+            # 【安卓】每次随机（apx + 6 位 hex，首字符字母），让国产手机厂商 OEM 应用
+            # 风控扫描器学不到固定特征——安卓 APK 里的 native 核会被静态扫描字符串。
+            TAG="apx$(openssl rand -hex 3)"
+            echo "[mihomo_tag] android auto-random: $TAG"
+          else
+            # 【桌面 win/mac/linux】固定 tag，绝不随机。
+            # 桌面 .exe 不经过手机厂商 OEM 扫描，随机 tag 对它零收益、纯伤害:
+            # PC 杀毒(火绒/360/Defender)靠 hash 白名单 + 云信誉工作,随机 tag =
+            # 每次出包都是全新 hash = 杀毒云永远学不到"这是安全的" = 启发式永远误报
+            # (HEUR/Generic),而且白名单申诉也无效(下次 hash 又变)。
+            # 固定 → 全品牌全版本同一个 ApexCore hash → 申诉一次永久全通用 + 云信誉可
+            # 积累。客户端对 tag 的 4 处字段零依赖(启动传 -d 覆盖 const Name / 不校验
+            # API "hello" / 不引用 MihomoName / TableName 是 Linux 路由表概念,Windows
+            # 用 wintun 不涉及),固定安全无副作用。见 2026-08-27 杀毒误报核查。
+            TAG="apex"
+            echo "[mihomo_tag] desktop fixed: $TAG"
+          fi
+          echo "MIHOMO_TAG=$TAG" >> "$GITHUB_ENV"
+
+      # ── 11b. Android: Gradle 依赖缓存 ─────────────────────────
+      # 缓存 ~/.gradle 的插件/依赖(Kotlin gradle plugin、AGP 等)。下过一次后
+      # 续 run 直接命中缓存,不再每次现拉 Maven Central / plugins.gradle.org,
+      # 挡掉 "Could not GET ...maven.apache.org" 那类网络抖动导致的偶发失败。
+      - name: Cache Gradle
+        if: |
+          matrix.platform == 'android' &&
+          (github.event_name == 'push' ||
+           inputs.platforms == '' ||
+           contains(inputs.platforms, matrix.platform))
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # ── 12. 编译构建 ──────────────────────────────────────────
+      - name: Build
+        if: |
+          github.event_name == 'push' ||
+          inputs.platforms == '' ||
+          contains(inputs.platforms, matrix.platform)
+        env:
+          APP_NAME:   ${{ inputs.app_name }}
+          APP_NAME_EN: ${{ inputs.app_name_en }}
+          XOR_KEY:    ${{ inputs.xor_key }}
+          APEX_FLAG:  ${{ inputs.apex_flag || 'apex' }}
+          ENABLE_ENCRYPTION: ${{ inputs.enable_encryption || 'yes' }}
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          OSS_URL_1:  ${{ inputs.oss_url_1 }}
+          OSS_URL_2:  ${{ inputs.oss_url_2 }}
+          OSS_URL_3:  ${{ inputs.oss_url_3 }}
+          OSS_URL_4:  ${{ inputs.oss_url_4 }}
+          PANEL_TYPE: ${{ inputs.panel_type || 'xboard' }}
+          API_PREFIX: ${{ inputs.api_prefix || '/api/v1' }}
+          DELAY_DISCOUNT: ${{ inputs.delay_discount }}
+          FIXED_INVITE_CODE: ${{ inputs.fixed_invite_code }}
+          # 默认语言(用户未主动选语言时用);空 → setup.dart 跳过 → 客户端默认 zh_CN。
+          DEFAULT_LOCALE: ${{ inputs.default_locale }}
+          # 【更新签名 · 2026-08-22 审计 H1】固定开发者公钥(base64),全 airport 通用,走仓库
+          # variable(公钥公开,非 secret)。空 → setup.dart 跳过 → 客户端验签关闭(行为不变)。
+          # 私钥只在下方签名步骤用 secret,绝不注入客户端。
+          UPDATE_PUBKEY_ED25519:    ${{ vars.UPDATE_PUBKEY_ED25519 }}
+          UPDATE_REQUIRE_SIGNATURE: ${{ vars.UPDATE_REQUIRE_SIGNATURE }}
+          # encrypt-middleware(opt-in 路径加密):从 1 个 mw JSON 串展开(规避 input 上限 25)。
+          # fromJSON('{}').xxx = null → 渲染成空串 → setup.dart 跳过空 dart-define → 客户端用默认
+          # (/assets/immutable、/sub、.json),与面板侧默认一致。aes_key 必须与中间件 AES_KEY 一致。
+          # ⚠️ 这三个默认值是**四处同步**的:客户端 middleware_settings.dart、v2board
+          # ApexMiddleware::PATH_PREFIX、xboard 插件 mw_path_prefix、机器人向导。改一处必须改全,
+          # 不一致的表现是"每个请求伪装 404、全站登录挂且无报错"。
+          APEX_MW_ENABLED:     ${{ fromJSON(inputs.mw || '{}').enabled }}
+          APEX_MW_AES_KEY:     ${{ fromJSON(inputs.mw || '{}').aes_key }}
+          APEX_MW_PATH_PREFIX: ${{ fromJSON(inputs.mw || '{}').path_prefix }}
+          APEX_MW_SUB_PREFIX:  ${{ fromJSON(inputs.mw || '{}').sub_prefix }}
+          APEX_MW_EXT:         ${{ fromJSON(inputs.mw || '{}').ext }}
+          ANDROID_FLAVOR: ${{ matrix.flavor || '' }}
+          # ↓ setup.dart::Build.mihomoTag 读这个，触发 mihomo 源码 patch + ldflags 注入
+          MIHOMO_TAG: ${{ env.MIHOMO_TAG }}
+        run: |
+          build_once() {
+            dart setup.dart ${{ matrix.platform }} \
+              ${{ matrix.arch && format('--arch {0}', matrix.arch) || '' }} \
+              ${{ env.IS_STABLE == 'true' && '--env stable' || '' }}
+          }
+          # 【重试推广到所有平台 · 2026-09-01 runs/33518846742】
+          # 原来只有 Android 有重试(Gradle 拉 Maven 的抖动)。但**每个平台**都要先
+          # 构建 Go 内核,而 Setup Go 是 `cache: false`(mihomo 源码在构建期才拉下来,
+          # setup-go 在那之前算不出 go.sum 缓存键),等于每次都从零拉全部 Go 依赖 ——
+          # 网络暴露面最大的一步反而没有重试。
+          #
+          # 实际失败(Windows,runs/33518846742):
+          #   adapter\outbound\ssh.go:18:2: github.com/metacubex/ssh@v0.1.0:
+          #     Get "https://proxy.golang.org/.../v0.1.0.mod":
+          #     wsarecv: An existing connection was forcibly closed by the remote host
+          #   Unhandled exception: build official mihomo error
+          # 注:GOPROXY 默认的 `,direct` 回退**只在 404/410 时生效**,连接被掐这种
+          # 网络错误不会触发回退,所以只能靠重试。
+          #
+          # 三次带退避(30s/60s)。构建本身幂等,重跑安全。
+          n=0; max=3
+          until build_once; do
+            n=$((n + 1))
+            if [ "$n" -ge "$max" ]; then
+              echo "::error::${{ matrix.platform }} 构建重试 $max 次仍失败"
+              exit 1
+            fi
+            wait=$((n * 30))
+            echo "::warning::${{ matrix.platform }} 构建失败(第 $n/$max 次),${wait}s 后重试(多为 Go module / Maven 网络抖动)…"
+            sleep "$wait"
+          done
+
+      # ── 12a-mac. macOS: ad-hoc 签名 + 打包成 DMG ──
+      #
+      # 用 hdiutil 直接打 DMG（已签名的 .app + /Applications symlink），用户
+      # 拖入 Applications 即可。本质上还是要去"设置"信任一下（ad-hoc 签名不
+      # 等于 Apple 公证），但 DMG 是 macOS 客户端最常见的分发形态。
+      - name: Sign macOS app (ad-hoc) and pack DMG
+        if: matrix.platform == 'macos'
+        run: |
+          # 优先从 build/ 目录拿 .app（最新最干净，刚 flutter build 出来）
+          APP_DIR=$(find build/macos/Build/Products/Release -name "*.app" -type d 2>/dev/null | head -1)
+          if [ -z "$APP_DIR" ]; then
+            echo "[sign] ⚠️ No .app found in build output, trying dist/"
+            # 兜底：从 flutter_distributor 产出的 DMG 提取（如果已有）
+            EXISTING_DMG=$(find dist -name "*.dmg" 2>/dev/null | head -1)
+            if [ -n "$EXISTING_DMG" ]; then
+              echo "[sign] Found existing DMG: $EXISTING_DMG"
+              MOUNT_DIR=$(mktemp -d)
+              hdiutil attach "$EXISTING_DMG" -mountpoint "$MOUNT_DIR" -nobrowse -quiet
+              APP_IN_DMG=$(find "$MOUNT_DIR" -name "*.app" -maxdepth 1 -type d | head -1)
+              if [ -n "$APP_IN_DMG" ]; then
+                WORK_DIR=$(mktemp -d)
+                cp -R "$APP_IN_DMG" "$WORK_DIR/"
+                hdiutil detach "$MOUNT_DIR" -quiet
+                APP_DIR=$(find "$WORK_DIR" -name "*.app" -type d | head -1)
+              else
+                hdiutil detach "$MOUNT_DIR" -quiet
+                echo "[sign] ❌ No .app found in DMG"
+                exit 1
+              fi
+            else
+              echo "[sign] ❌ No .app and no DMG found"
+              exit 1
+            fi
+          fi
+
+          echo "[sign] Signing: $APP_DIR"
+
+          # 递归签名所有 frameworks 和 dylibs（由内而外）
+          find "$APP_DIR" -name "*.framework" -o -name "*.dylib" | while read fw; do
+            codesign --force --deep --sign - "$fw" 2>/dev/null || true
+          done
+
+          # 签名主 App（ad-hoc，与上游 FlClash 一致）
+          # ⚠️ 必须带 --entitlements!此前 `--sign -` 不带 --entitlements → 这步
+          # --force 重签把 Xcode 应用的 Release.entitlements（network/jit/
+          # disable-library-validation）全抹空 → 出厂包 entitlements 为空。
+          # ⚠️⚠️ 但**绝不能带 keychain-access-groups**！它是 restricted entitlement,
+          # ad-hoc 签名(无 team)claim 它会被 macOS amfid 拒绝启动（open 报
+          # "Launchd job spawn failed" error 163,且签名有效故 Gatekeeper 不给"仍然
+          # 打开" → 用户看到"打不开"死包）。实测坐实。token 的 Keychain 已有 SP 回退
+          # 兜底（app 侧 token_manager），无需靠 keychain-access-groups。
+          SIGN_ENT="${RUNNER_TEMP:-/tmp}/sign.entitlements"
+          if [ -f macos/Runner/Release.entitlements ]; then
+            cp macos/Runner/Release.entitlements "$SIGN_ENT"
+          else
+            printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+              '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+              '<plist version="1.0"><dict>' \
+              '<key>com.apple.security.network.client</key><true/>' \
+              '<key>com.apple.security.network.server</key><true/>' \
+              '<key>com.apple.security.cs.allow-jit</key><true/>' \
+              '<key>com.apple.security.cs.disable-library-validation</key><true/>' \
+              '</dict></plist>' > "$SIGN_ENT"
+          fi
+          # 防御:确保签名 entitlements 里绝无 keychain-access-groups（会让 ad-hoc 拒启动）。
+          /usr/libexec/PlistBuddy -c "Delete :keychain-access-groups" "$SIGN_ENT" 2>/dev/null || true
+          codesign --force --deep --sign - --entitlements "$SIGN_ENT" "$APP_DIR"
+          echo "[sign] ✅ Ad-hoc signed with entitlements: $APP_DIR"
+          echo "[sign] entitlements:"; codesign -d --entitlements :- "$APP_DIR" 2>/dev/null | tr -d '\0' || true; echo
+
+          # 验证签名
+          codesign -v "$APP_DIR" && echo "[sign] ✓ Signature valid" || echo "[sign] ⚠️ Signature verification warning"
+
+          # ── 打包成 DMG ──
+          APP_NAME_BUNDLE=$(basename "$APP_DIR")        # 例: Apex.app / MyApp.app
+          APP_NAME_NOAPP="${APP_NAME_BUNDLE%.app}"      # 例: Apex / MyApp
+
+          # 从 Info.plist 读取 version 用于文件名
+          VERSION=$(plutil -extract CFBundleShortVersionString raw -o - "$APP_DIR/Contents/Info.plist" 2>/dev/null || echo "1.0")
+
+          # DMG 输出文件名（matrix.arch=universal）
+          mkdir -p dist
+          DMG_OUTPUT="dist/${APP_NAME_NOAPP}-${VERSION}-macos-universal.dmg"
+
+          # 清掉旧产物（flutter_distributor 可能已先产出一份未签名的 DMG/PKG）。
+          # 同时删掉 flutter_distributor 顺带产出的 .zip：macOS 只发 DMG，不发 zip
+          # （.app 来自 build/ 目录，不依赖这个 zip，删了安全）。
+          rm -f dist/*.dmg dist/*.pkg dist/*.zip
+
+          # staging：签名后的 .app + /Applications symlink（拖拽安装的视觉提示）
+          STAGING=$(mktemp -d)
+          cp -R "$APP_DIR" "$STAGING/"
+          ln -s /Applications "$STAGING/Applications"
+
+          # 安装教程：拖拽 + Gatekeeper 信任流程引导。
+          # 用 { echo; ... } 块而不是 heredoc——heredoc 内容必须顶格，会破坏
+          # YAML 缩进让整个 workflow 解析失败（GitHub 报 422 "Workflow does not
+          # have 'workflow_dispatch' trigger"）。
+          {
+            echo "═══════════════════════════════════════════════"
+            echo "  ${APP_NAME_NOAPP} for macOS  安装指南"
+            echo "═══════════════════════════════════════════════"
+            echo ""
+            echo "【第一步】拖拽安装"
+            echo "  把左侧 ${APP_NAME_BUNDLE} 图标，拖到右侧 Applications 文件夹"
+            echo ""
+            echo "【第二步】首次打开"
+            echo "  打开 Launchpad（或前往「应用程序」文件夹），双击 ${APP_NAME_NOAPP}"
+            echo ""
+            echo "【第三步】系统会提示「无法打开，因为 Apple 无法检查恶意软件」"
+            echo "  这是 macOS 对未付费苹果开发者签名的 App 的默认拦截，不是病毒。"
+            echo "  按下面步骤一次性放行："
+            echo ""
+            echo "    1) 关闭弹窗，点屏幕左上角苹果图标 → 系统设置"
+            echo "    2) 左栏拉到底，进入「隐私与安全性」"
+            echo "    3) 右侧拉到底，会看到提示："
+            echo "       「${APP_NAME_NOAPP} 已被阻止使用，因为它不是来自已识别的开发者」"
+            echo "    4) 点该提示右侧的【仍要打开】按钮"
+            echo "    5) 系统弹出再次确认 → 点【打开】，输入你的开机密码"
+            echo ""
+            echo "    （以后每次启动 ${APP_NAME_NOAPP} 都会直接打开，不再提示）"
+            echo ""
+            echo "【完成】"
+            echo "  现在 ${APP_NAME_NOAPP} 已经可以正常使用了。"
+            echo ""
+            echo "─────────────────────────────────────────────────"
+            echo "  常见问题"
+            echo "─────────────────────────────────────────────────"
+            echo ""
+            echo "Q: 启动时提示「${APP_NAME_NOAPP} 已损坏，无法打开」"
+            echo "A: 这是更严格的拦截，打开「终端」运行下面这条命令后重试："
+            echo "   sudo xattr -dr com.apple.quarantine /Applications/${APP_NAME_BUNDLE}"
+            echo ""
+            echo "Q: 「隐私与安全性」里没看到放行按钮？"
+            echo "A: 先双击 ${APP_NAME_NOAPP} 触发一次拦截，再去设置里就能看到了。"
+            echo ""
+            echo "—— 如有其他问题请联系技术支持"
+          } > "$STAGING/安装教程.txt"
+
+          # 卷名（中文 OK——macOS 用 HFS+/APFS 支持 UTF-8 卷名）
+          VOLNAME="${APP_NAME_NOAPP}"
+
+          echo "[dmg] Building DMG via appdmg..."
+          echo "[dmg]   App:         $APP_NAME_BUNDLE"
+          echo "[dmg]   Version:     $VERSION"
+          echo "[dmg]   Volume name: $VOLNAME"
+          echo "[dmg]   Output:      $DMG_OUTPUT"
+
+          # ── appdmg：JSON 规格**直接写 .DS_Store**,不依赖 Finder ──────────
+          # 老方案(hdiutil UDRW + osascript 设图标位置)在 GitHub 无头 runner 上
+          # Finder 不可用 → AppleScript 每次失败(日志: "AppleScript 失败,退回
+          # 默认布局")→ DMG 用默认小窗口+工具栏 → 3 个图标塞不下被截断。appdmg
+          # 是 headless 确定性布局的业界做法(Electron 等 CI 通用)。
+          # 用 { printf; } > file 写规格(本 workflow 已证 heredoc 会破坏 YAML)。
+          SPEC="$(mktemp -d)/appdmg.json"
+          {
+            printf '{\n'
+            printf '  "title": "%s",\n' "$VOLNAME"
+            printf '  "icon-size": 120,\n'
+            printf '  "window": { "size": { "width": 600, "height": 520 } },\n'
+            printf '  "contents": [\n'
+            printf '    { "x": 300, "y": 130, "type": "file", "path": "%s/安装教程.txt" },\n' "$STAGING"
+            printf '    { "x": 165, "y": 330, "type": "file", "path": "%s/%s" },\n' "$STAGING" "$APP_NAME_BUNDLE"
+            printf '    { "x": 435, "y": 330, "type": "link", "path": "/Applications" }\n'
+            printf '  ]\n'
+            printf '}\n'
+          } > "$SPEC"
+
+          rm -f "$DMG_OUTPUT"
+          # ⚠️ 不再 `>/dev/null 2>&1` 吞掉 appdmg 安装/运行的错误 —— 之前它把 appdmg 的
+          # 原生模块(fs-xattr 需 node-gyp 编译)失败悄悄咽了,于是每次都退回 hdiutil 默认
+          # 布局:带工具栏、窗口小、3 个图标被截断 → 用户投诉"要下拉才看得到"。现在:
+          #   ① 全局装失败就试 npx(免全局权限/PATH 问题);② 失败原因打进日志便于排查。
+          DMG_OK=0
+          if command -v appdmg >/dev/null 2>&1 || npm install -g appdmg; then
+            if appdmg "$SPEC" "$DMG_OUTPUT"; then DMG_OK=1; fi
+          fi
+          if [ "$DMG_OK" != 1 ]; then
+            echo "[dmg] 全局 appdmg 不可用,改试 npx appdmg…"
+            if npx --yes appdmg "$SPEC" "$DMG_OUTPUT"; then DMG_OK=1; fi
+          fi
+          if [ "$DMG_OK" = 1 ]; then
+            echo "[dmg] ✅ appdmg 布局成功(干净图标视图,无工具栏,不截断)"
+          else
+            echo "[dmg] ⚠️ appdmg 仍不可用,退回 hdiutil(默认布局,可能被截断——见上方报错)"
+            hdiutil create -volname "$VOLNAME" -srcfolder "$STAGING" \
+              -ov -format UDZO -imagekey zlib-level=9 "$DMG_OUTPUT"
+          fi
+
+          rm -rf "$STAGING"
+
+          if [ -f "$DMG_OUTPUT" ]; then
+            echo "[dmg] ✅ DMG built: $DMG_OUTPUT ($(du -sh "$DMG_OUTPUT" | cut -f1))"
+          else
+            echo "[dmg] ❌ hdiutil 产出文件不存在"
+            exit 1
+          fi
+
+          ls -la dist/
+
+      # ── 12b. 重命名输出文件（ASCII 包名 → 完整 App 名）──
+      - name: Rename dist files
+        if: (matrix.platform == 'windows' || matrix.platform == 'linux') && github.event_name == 'workflow_dispatch' && inputs.app_name != ''
+        env:
+          APP_NAME: ${{ inputs.app_name }}
+        run: |
+          python3 -X utf8 << 'PYEOF'
+          import os, re
+          from pathlib import Path
+
+          app_name = os.environ.get('APP_NAME', '').strip()
+          if not app_name:
+              print('[rename] APP_NAME not set, skipping')
+              exit(0)
+
+          # 与 inject 步骤相同的 sanitize 逻辑，得到打包工具用的 ASCII 名
+          ascii_name = re.sub(r'[\s/\\:*?"<>|]+', '_', app_name)
+          ascii_name = re.sub(r'[^\x00-\x7F]+', '', ascii_name)
+          ascii_name = re.sub(r'[^a-zA-Z0-9_-]+', '_', ascii_name).strip('_') or 'Apex'
+
+          if ascii_name == app_name:
+              print(f'[rename] ascii name == app_name ("{app_name}")，无需重命名')
+              exit(0)
+
+          dist = Path('dist')
+          if not dist.exists():
+              print('[rename] dist/ 不存在，跳过')
+              exit(0)
+
+          renamed = 0
+          for f in sorted(dist.rglob('*')):
+              if f.is_file() and ascii_name in f.name:
+                  new_name = f.name.replace(ascii_name, app_name, 1)
+                  new_path = f.parent / new_name
+                  f.rename(new_path)
+                  print(f'[rename] {f.name} → {new_name}')
+                  renamed += 1
+
+          print(f'[rename] 共重命名 {renamed} 个文件（ascii="{ascii_name}", app="{app_name}"）')
+          PYEOF
+
+      # ── 12c. Windows: 下载 VC++ 运行库 + WebView2 运行库（Inno 安装包内置）────
+      - name: Download VC++ Redistributable & WebView2 runtime
+        if: matrix.platform == 'windows'
+        run: |
+          curl -fsSL --retry 3 --retry-delay 5 -o vc_redist.x64.exe "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+          # WebView2 Evergreen Bootstrapper：inno_setup.iss 的 [Files]/[Run] 会内置并静默安装。
+          # Win11 内置，但 Win10 LTSC/N/老版本无 → 客服/公告页(flutter_inappwebview)白屏。
+          curl -fsSL --retry 3 --retry-delay 5 -o MicrosoftEdgeWebview2Setup.exe "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+
+      # ── 12c2. Windows: VC++ DLL 同捆到 Release (工业级标准) ────
+      # 把 vcruntime140 / msvcp140 系列 dll 直接拷到 exe 同目录, Windows
+      # DLL 搜索顺序优先 exe 所在目录, 用户即使没装 VC++ Redistributable
+      # 也能直接双击 exe 启动. OBS/7-Zip/VSCode 同样做法.
+      #
+      # 跟 12c 互补(双保险): 12c 让 Inno 安装包后台静默装系统 runtime
+      # (其他软件也能受益); 12c2 把 DLL 同捆进 Release/ → Inno 打进安装包,
+      # 装好的 exe 同目录就有运行库, 即使 vc_redist 静默装失败也能起.
+      # (注: 便携 zip 已在 12e 停发, 因为它早于本步压包, 带不到这些 DLL.)
+      #
+      # 修 0xc0e90002 STATUS_SXS_CANT_GEN_ACTCTX "损坏的映像" 报错.
+      - name: Bundle VC++ runtime DLLs into Release
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $releaseDir = "build\windows\x64\runner\Release"
+          if (-not (Test-Path $releaseDir)) {
+            Write-Host "::warning::Release dir not found at $releaseDir, looking elsewhere"
+            $releaseDir = (Get-ChildItem -Path build\windows -Filter Release -Recurse -Directory | Select-Object -First 1).FullName
+          }
+          if (-not (Test-Path $releaseDir)) {
+            Write-Host "::error::No Flutter Windows Release dir found, skipping VC++ DLL bundle"
+            exit 0
+          }
+          Write-Host "Bundling VC++ DLLs into: $releaseDir"
+          $dlls = @(
+            'vcruntime140.dll',
+            'vcruntime140_1.dll',
+            'msvcp140.dll',
+            'msvcp140_1.dll',
+            'msvcp140_2.dll',
+            'msvcp140_atomic_wait.dll',
+            'msvcp140_codecvt_ids.dll'
+          )
+          foreach ($dll in $dlls) {
+            $src = "C:\Windows\System32\$dll"
+            if (Test-Path $src) {
+              Copy-Item -Path $src -Destination $releaseDir -Force
+              Write-Host "  ✓ $dll"
+            } else {
+              Write-Host "  ⚠ $dll not found in System32 (可能此版本 VC++ 不需要, 安全跳过)"
+            }
+          }
+          Write-Host "Final Release dir contents:"
+          Get-ChildItem $releaseDir -Filter "*.dll" | Select-Object Name, Length | Format-Table
+
+      # ── 12d. Windows: Inno Setup 打包 ────────────────────────
+      - name: Build Windows installer (Inno Setup)
+        if: matrix.platform == 'windows'
+        # 见 Compute MIHOMO_TAG 处的说明:inputs 一律走 env,不内插进 run:。
+        # app_name 是机场主在 TG 里随手输入的显示名,bot 侧原本零校验。
+        env:
+          APP_NAME_RAW: ${{ inputs.app_name }}
+          APP_VERSION_RAW: ${{ inputs.app_version }}
+        run: |
+          APP_NAME="$APP_NAME_RAW"
+          APP_NAME="${APP_NAME:-Apex}"
+
+          APP_VERSION="$APP_VERSION_RAW"
+          if [ -z "$APP_VERSION" ]; then
+            APP_VERSION=$(grep "^version:" pubspec.yaml | sed 's/version: //' | sed 's/+.*//')
+          fi
+
+          # 从 CMakeLists.txt 读取实际 exe 名（inject 步骤可能已修改）
+          # 注意：不能用 grep -oP（Perl正则），Windows CI 的 Git Bash 不支持，
+          # 会静默失败导致回退到 FlClash → 快捷方式指向错误的 exe
+          BINARY_EXE=$(sed -n 's/.*set(BINARY_NAME[[:space:]]*"\([^"]*\)").*/\1/p' windows/CMakeLists.txt 2>/dev/null)
+          BINARY_EXE="${BINARY_EXE:-Apex}"
+
+          # 从 app_name SHA256 前 32 位生成稳定 GUID（同名每次固定）
+          HASH=$(echo -n "$APP_NAME" | sha256sum | cut -c1-32 | tr '[:lower:]' '[:upper:]')
+          APP_UUID="${HASH:0:8}-${HASH:8:4}-${HASH:12:4}-${HASH:16:4}-${HASH:20:12}"
+
+          echo "Inno: AppName=$APP_NAME  BinaryExe=$BINARY_EXE  AppVersion=$APP_VERSION  AppId=$APP_UUID"
+
+          if [ -f "update_installer.iss" ]; then
+            mkdir -p dist
+            # MSYS_NO_PATHCONV=1 防止 Git Bash 把 /DKey=Val 当成 Windows 路径转换
+            # （/D 会被误判为驱动器盘符 D:\，导致 ISCC 收到多个"文件名"参数报错）
+            MSYS_NO_PATHCONV=1 ISCC.exe \
+              "/DMyAppName=$APP_NAME" \
+              "/DMyBinaryName=$BINARY_EXE" \
+              "/DMyAppVersion=$APP_VERSION" \
+              "/DMyAppId=$APP_UUID" \
+              update_installer.iss
+          else
+            echo "[installer] update_installer.iss not found, skipping"
+          fi
+
+      # ── 12e. Windows: 只发安装包,移除便携 zip(安全网)──────────
+      # 现在 setup.dart 的 windows 分支直接 flutter build,不再产便携 zip,
+      # 所以对新 tag 这步是无害空操作。但**旧 tag**(setup.dart 还走
+      # flutter_distributor --targets zip 的版本)构建时仍会产出 zip,而它
+      # 早于 12c2 的 VC++ DLL 同捆 → 不含运行库,干净系统解压即撞 0xc0e90002。
+      # 保留此步兜旧 ref:统一只发自带 vc_redist + 同捆 DLL 的 Inno 安装包。
+      - name: Drop Windows portable zip (ship installer only)
+        if: matrix.platform == 'windows'
+        run: rm -f dist/*.zip
+
+      # ── 13. 构建结果诊断 ──────────────────────────────────────
+      - name: Debug dist output
+        if: always()
+        run: |
+          echo "=== dist/ contents ==="
+          ls -la dist/ 2>/dev/null || echo "[dist/ not found]"
+
+      # ── 14. 上传构建产物 ──────────────────────────────────────
+      - name: Upload artifact
+        if: |
+          github.event_name == 'push' ||
+          inputs.platforms == '' ||
+          contains(inputs.platforms, matrix.platform)
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-${{ matrix.platform }}${{ matrix.arch && format('-{0}', matrix.arch) || '' }}${{ matrix.flavor && format('-{0}', matrix.flavor) || '' }}
+          path: ./dist
+          overwrite: true
+
+      # ── 15. 构建完成：通过 TG 发包 ─────────────────────────
+      # 仅 workflow_dispatch 且配置了 notify_chat_id 时触发
+      # 使用 Python：全平台统一 UTF-8，Android 多 APK 合并为一条消息
+      - name: Notify and send artifacts to Telegram
+        if: |
+          always() &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.notify_chat_id != '' &&
+          (inputs.platforms == '' || contains(inputs.platforms, matrix.platform))
+        env:
+          BOT_TOKEN:  ${{ secrets.BUILD_BOT_TOKEN }}
+          CHAT_ID:    ${{ inputs.notify_chat_id }}
+          PLATFORM:   ${{ matrix.platform }}
+          ARCH:       ${{ matrix.arch }}
+          FLAVOR:     ${{ matrix.flavor || '' }}
+          RUN_URL:    ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+          PYTHONUTF8: "1"
+        run: |
+          python3 -X utf8 - << 'PYEOF'
+          import os, sys, json, urllib.request
+          from pathlib import Path
+
+          bot_token = os.environ.get("BOT_TOKEN", "").strip()
+          if not bot_token:
+              print("[notify] BUILD_BOT_TOKEN not configured, skip")
+              sys.exit(0)
+
+          chat_id    = os.environ.get("CHAT_ID", "").strip()
+          platform   = os.environ.get("PLATFORM", "").strip()
+          arch       = os.environ.get("ARCH", "").strip()
+          flavor     = os.environ.get("FLAVOR", "").strip()
+          run_url    = os.environ.get("RUN_URL", "").strip()
+          job_status = os.environ.get("JOB_STATUS", "").strip()
+          API        = f"https://api.telegram.org/bot{bot_token}"
+
+          LABELS = {
+              "android-mobile": "📱 Android 手机版",
+              "android-tv":     "📺 Android TV版",
+              "windows-amd64":    "🖥️ Windows (x64)",
+              "macos-universal":  "🍏 macOS (Universal)",
+              "linux-amd64":      "🐧 Linux (x64)",
+              "ios-arm64":        "🍎 iOS",
+          }
+          # Android 用 flavor 作 key（android-mobile / android-tv），其他平台用 arch
+          lookup_key = f"{platform}-{flavor}" if flavor else f"{platform}-{arch}"
+          label = LABELS.get(lookup_key, f"{platform}{'-'+arch if arch else ''}{'-'+flavor if flavor else ''}")
+
+          def send_json(endpoint, data):
+              req = urllib.request.Request(
+                  f"{API}/{endpoint}",
+                  data=json.dumps(data).encode("utf-8"),
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return json.loads(r.read())
+              except Exception as e:
+                  print(f"[notify] {endpoint} error: {e}")
+                  return {}
+
+          def make_multipart(fields, files):
+              boundary = "TGboundary7749"
+              body = b""
+              for k, v in fields.items():
+                  body += (
+                      f"--{boundary}\r\n"
+                      f'Content-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'
+                  ).encode("utf-8")
+              for name, fname, data in files:
+                  body += (
+                      f"--{boundary}\r\n"
+                      f'Content-Disposition: form-data; name="{name}"; filename="{fname}"\r\n'
+                      f"Content-Type: application/octet-stream\r\n\r\n"
+                  ).encode("utf-8")
+                  body += data
+                  body += b"\r\n"
+              body += f"--{boundary}--\r\n".encode("utf-8")
+              return boundary, body
+
+          # Telegram Bot API 单文件上限 50MB。安卓 universal 包常年 150MB+,
+          # 硬发只会拿到一句看不懂的 API 错误。当前流程本来就走 GitHub 下载
+          # (BUILD_BOT_TOKEN 默认不配),这里只是防止以后有人配上 token 后
+          # 对着静默失败排查。
+          TG_MAX_BYTES = 50 * 1024 * 1024
+
+          def send_document(fp):
+              size = fp.stat().st_size
+              if size > TG_MAX_BYTES:
+                  print(f"[notify] skip {fp.name}: {size // 1024 // 1024}MB "
+                        f"超过 Telegram 50MB 上限,请从 Actions 下载")
+                  return
+              boundary, body = make_multipart(
+                  {"chat_id": chat_id},
+                  [("document", fp.name, fp.read_bytes())],
+              )
+              req = urllib.request.Request(
+                  f"{API}/sendDocument", data=body,
+                  headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=120):
+                      print(f"[notify] sent {fp.name}")
+              except Exception as e:
+                  print(f"[notify] failed {fp.name}: {e}")
+
+          def send_media_group(fps):
+              media = [{"type": "document", "media": f"attach://file{i}"} for i in range(len(fps))]
+              files = [(f"file{i}", fp.name, fp.read_bytes()) for i, fp in enumerate(fps)]
+              boundary, body = make_multipart(
+                  {"chat_id": chat_id, "media": json.dumps(media)},
+                  files,
+              )
+              req = urllib.request.Request(
+                  f"{API}/sendMediaGroup", data=body,
+                  headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=180):
+                      print(f"[notify] sent media group ({len(fps)} files)")
+              except Exception as e:
+                  print(f"[notify] media group failed: {e}, falling back")
+                  for fp in fps:
+                      send_document(fp)
+
+          if job_status == "success":
+              msg = f"\u2705 *{label}* \u6784\u5efa\u5b8c\u6210"
+          else:
+              msg = f"\u274c *{label}* \u6784\u5efa\u5931\u8d25 \u2014 [\u67e5\u770b\u65e5\u5fd7]({run_url})"
+
+          send_json("sendMessage", {
+              "chat_id": chat_id,
+              "text": msg,
+              "parse_mode": "Markdown",
+              "disable_web_page_preview": True,
+          })
+
+          if job_status == "success":
+              dist = Path("dist")
+              all_files = sorted(
+                  f for f in dist.rglob("*")
+                  if f.is_file() and not f.name.endswith(".sha256")
+              ) if dist.exists() else []
+
+              file_list = "\n".join(f"• `{f.name}`" for f in all_files) if all_files else "（无文件）"
+
+              send_json("sendMessage", {
+                  "chat_id": chat_id,
+                  "text": f"\U0001f4e6 *{label}* 安装包：\n\n{file_list}\n\n\U0001f517 [前往 Actions 下载]({run_url})\n⚠️ 需登录 GitHub 账号",
+                  "parse_mode": "Markdown",
+                  "disable_web_page_preview": True,
+              })
+          PYEOF
+
+  # ── OpenWrt：交叉编译 mihomo 核心（全架构合并为一个 artifact）──
+  openwrt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: |
+      github.event_name == 'push' ||
+      inputs.platforms == '' ||
+      contains(inputs.platforms, 'openwrt')
+
+    steps:
+      - name: Configure git credentials
+        run: |
+          git config --global credential.helper ""
+          git config --global url."https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "git@github.com:"
+          git config --global url."https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - name: Checkout private source
+        uses: actions/checkout@v4
+        with:
+          # inputs.source_repo 为空/非 dispatch 触发时回落 Secret（向后兼容）
+          repository: ${{ inputs.source_repo || secrets.PRIVATE_REPO_NAME }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          submodules: recursive
+          ref: ${{ env.PRIVATE_REF }}
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Get version
+        id: version
+        # inputs 走 env,不内插进 run:(见 Compute MIHOMO_TAG 处说明)。
+        env:
+          APP_VERSION_RAW: ${{ inputs.app_version }}
+        run: |
+          # 与桌面/移动端同源:优先用机器人设的 app_version(inputs),空时才回退
+          # pubspec.yaml。此前只读 pubspec → OpenWrt 产物版本(4.0.2)和 app 版本
+          # (机器人设的 3.7.6)对不上。
+          VER="$APP_VERSION_RAW"
+          [ -z "$VER" ] && VER=$(grep -oP 'version:\s*\K[\d.]+' pubspec.yaml || echo "0.0.0")
+          echo "version=$VER" >> $GITHUB_OUTPUT
+
+      - name: Build all OpenWrt architectures
+        env:
+          # 与桌面/移动端同一套 inputs，保证同品牌 flag/key 一致
+          XOR_KEY:           ${{ inputs.xor_key }}
+          APEX_FLAG:         ${{ inputs.apex_flag || 'apex' }}
+          ENABLE_ENCRYPTION: ${{ inputs.enable_encryption || 'yes' }}
+          # inputs 走 env,不内插进 run:(见 Compute MIHOMO_TAG 处说明)。
+          APP_NAME_RAW:      ${{ inputs.app_name || 'mihomo' }}
+          VER_RAW:           ${{ steps.version.outputs.version }}
+        run: |
+          set -e
+          VER="$VER_RAW"
+          BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          APP_NAME="$APP_NAME_RAW"
+          # opkg 包标识符必须 ASCII：app_name 可能含中文（仅用于描述），
+          # 包名/文件名统一用 ASCII 安全的 PKG_NAME。
+          PKG_NAME="$(printf '%s' "$APP_NAME" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cd 'a-z0-9-')"
+          [ -z "$PKG_NAME" ] && PKG_NAME="mihomo"
+          echo "APP_NAME=$APP_NAME  PKG_NAME=$PKG_NAME"
+          LDFLAGS="-w -s -X 'github.com/metacubex/mihomo/constant.Version=$VER' -X 'github.com/metacubex/mihomo/constant.BuildTime=$BUILD_TIME'"
+          # 内核源:剥离 FlClash 后 core/Clash.Meta 子模块已删,改克隆官方 mihomo
+          # (与客户端 openwrt/build.sh、build-mihomo.sh 同一策略)。
+          MIHOMO_VERSION="v1.19.29"
+          CORE_DIR="/tmp/mihomo-src"
+          if [ ! -f "$CORE_DIR/go.mod" ]; then
+            echo "=== 克隆官方 mihomo $MIHOMO_VERSION ==="
+            rm -rf "$CORE_DIR"
+            git clone --depth 1 --branch "$MIHOMO_VERSION" \
+              https://github.com/MetaCubeX/mihomo.git "$CORE_DIR"
+          fi
+          # 内置 metacubexd 控制台(打包时下好,离线可用,避免 CN 环境代理未起时
+          # 运行时从 GitHub 下载面板的鸡生蛋问题;init.d 运行时下载保留为回退)。
+          UI_SRC="/tmp/mihomo-ui"
+          if [ ! -f "$UI_SRC/index.html" ]; then
+            echo "=== 下载 metacubexd 控制台 ==="
+            rm -rf "$UI_SRC"; mkdir -p "$UI_SRC"
+            curl -sL --connect-timeout 15 --max-time 120 \
+              "https://github.com/MetaCubeX/metacubexd/releases/latest/download/compressed-dist.tgz" \
+              | tar xz -C "$UI_SRC" 2>/dev/null || true
+            if [ ! -f "$UI_SRC/index.html" ]; then
+              sub=$(ls -d "$UI_SRC"/*/ 2>/dev/null | head -1)
+              [ -n "$sub" ] && mv "$sub"* "$UI_SRC/" 2>/dev/null || true
+            fi
+            [ -f "$UI_SRC/index.html" ] && echo "  metacubexd OK" \
+              || echo "  ⚠️ metacubexd 下载失败,退回运行时下载"
+          fi
+          mkdir -p dist
+
+          # ── 注入加密订阅参数到默认 uci 配置（路由用户零配置）──────────
+          # 加密开启且 xor_key 非空 → 注入 key；否则明文（不注入 key，
+          # init.d 里只有配了 xor_key 才会请求 flag=apex）。apex_flag 始终写入。
+          # awk+ENVIRON 读值：key 含 / & \ 等特殊字符也安全，不用 sed。
+          CFG="openwrt/etc/config/mihomo"
+          if [ "$ENABLE_ENCRYPTION" = "yes" ] && [ -n "$XOR_KEY" ]; then
+            INJ_KEY="$XOR_KEY"
+          else
+            INJ_KEY=""
+          fi
+          XOR_KEY="$INJ_KEY" APEX_FLAG="${APEX_FLAG:-apex}" awk -v q="'" '
+            BEGIN { k=ENVIRON["XOR_KEY"]; f=ENVIRON["APEX_FLAG"] }
+            /option xor_key /  && k!="" { print "\toption xor_key "  q k q; next }
+            /option apex_flag / && f!="" { print "\toption apex_flag " q f q; next }
+            { print }
+          ' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
+          # 只报 set/empty，不打印 key 本身
+          echo "openwrt config injected: xor_key=$([ -n "$INJ_KEY" ] && echo set || echo empty) apex_flag=${APEX_FLAG:-apex}"
+
+          # OpenWrt ipk 架构命名（与 opkg 架构一致）
+          # https://openwrt.org/docs/techref/instructionset
+          # 主流路由器只需 3 个架构：
+          #   x86_64           — 软路由（N100/N5105 工控机、PVE/ESXi 虚拟）
+          #   aarch64_generic  — arm64（红米/小米 AX、GL.iNet Flint、NanoPi 等）
+          #   arm_cortex-a7    — 老 MT7621（小米 4A 千兆、Newifi 3 等）
+          # 砍掉 armv5 / mips / mipsle：用户量 <3%，且 CPU 太弱跑不动现代代理。
+          ipk_arch_name() {
+            case "$1" in
+              amd64)            echo "x86_64" ;;
+              arm64)            echo "aarch64_generic" ;;
+              armv7)            echo "arm_cortex-a7" ;;
+            esac
+          }
+
+          build_arch() {
+            local arch="$1" goarch="$2" goarm="$3" gomips="$4"
+            local ipk_arch; ipk_arch="$(ipk_arch_name "$arch")"
+            echo "=== Building $arch (ipk: $ipk_arch) ==="
+
+            GOOS=linux GOARCH="$goarch" GOARM="$goarm" GOMIPS="$gomips" CGO_ENABLED=0 \
+              go build -C "$CORE_DIR" -tags="with_gvisor" -trimpath -ldflags="$LDFLAGS" -o "/tmp/mihomo-$arch"
+
+            local pkg="/tmp/pkg-$arch"
+            mkdir -p "$pkg/usr/bin" "$pkg/etc/init.d" "$pkg/etc/config" "$pkg/etc/mihomo" "$pkg/etc/mihomo/ui" "$pkg/etc/uci-defaults"
+
+            cp "/tmp/mihomo-$arch" "$pkg/usr/bin/mihomo"
+            chmod 755 "$pkg/usr/bin/mihomo"
+            cp openwrt/etc/init.d/mihomo "$pkg/etc/init.d/mihomo"
+            chmod 755 "$pkg/etc/init.d/mihomo"
+            cp openwrt/etc/config/mihomo "$pkg/etc/config/mihomo"
+            cp openwrt/etc/mihomo/config.yaml "$pkg/etc/mihomo/config.yaml"
+            cp openwrt/etc/uci-defaults/99-mihomo "$pkg/etc/uci-defaults/99-mihomo"
+            chmod 755 "$pkg/etc/uci-defaults/99-mihomo"
+            # 内置 metacubexd 控制台(离线可用)
+            if [ -f "$UI_SRC/index.html" ]; then
+              cp -r "$UI_SRC/." "$pkg/etc/mihomo/ui/"
+            fi
+
+            # ── 打 .ipk（OpenWrt 传统格式：gzipped tar 套两层 tar.gz，非 deb 的 ar 归档）──
+            local ctl="/tmp/ctl-$arch"
+            mkdir -p "$ctl"
+            {
+              printf 'Package: %s\n'        "$PKG_NAME"
+              printf 'Version: %s\n'        "$VER"
+              printf 'Architecture: %s\n'   "$ipk_arch"
+              printf 'Maintainer: Apex <noreply@apex.local>\n'
+              printf 'Section: net\n'
+              printf 'Priority: optional\n'
+              printf 'Description: %s VPN client (mihomo core) for OpenWrt.\n' "$APP_NAME"
+            } > "$ctl/control"
+            {
+              printf '#!/bin/sh\n'
+              printf '[ -n "${IPKG_INSTROOT}" ] && exit 0\n'
+              printf '/etc/init.d/mihomo enable 2>/dev/null || true\n'
+              printf 'echo "[%s] installed. Run: /etc/init.d/mihomo start"\n' "$APP_NAME"
+              printf 'exit 0\n'
+            } > "$ctl/postinst"
+            {
+              printf '#!/bin/sh\n'
+              printf '[ -n "${IPKG_INSTROOT}" ] && exit 0\n'
+              printf '/etc/init.d/mihomo stop 2>/dev/null || true\n'
+              printf '/etc/init.d/mihomo disable 2>/dev/null || true\n'
+              printf 'exit 0\n'
+            } > "$ctl/prerm"
+            chmod 755 "$ctl/postinst" "$ctl/prerm"
+
+            (cd "$ctl" && tar czf /tmp/control.tar.gz ./control ./postinst ./prerm)
+            (cd "$pkg" && tar czf /tmp/data.tar.gz .)
+            echo "2.0" > /tmp/debian-binary
+
+            local ipk_name="${PKG_NAME}_${VER}_${ipk_arch}.ipk"
+            (cd /tmp && tar czf "$GITHUB_WORKSPACE/dist/$ipk_name" ./debian-binary ./control.tar.gz ./data.tar.gz)
+
+            rm -rf "$pkg" "$ctl" "/tmp/mihomo-$arch" /tmp/control.tar.gz /tmp/data.tar.gz /tmp/debian-binary
+          }
+
+          build_arch amd64 amd64 "" ""
+          build_arch arm64 arm64 "" ""
+          build_arch armv7 arm   7  ""
+
+          # ── 打 luci-app-mihomo_*.ipk（arch=all，Lua 脚本无需编译）──
+          echo "=== Building luci-app-mihomo (all) ==="
+          luci_pkg="/tmp/pkg-luci"
+          mkdir -p "$luci_pkg"
+          cp -r openwrt/luci-app-mihomo/files/. "$luci_pkg/"
+          find "$luci_pkg" -type f -name "*.lua"        -exec chmod 644 {} \;
+          find "$luci_pkg" -type f -name "*.htm"        -exec chmod 644 {} \;
+          find "$luci_pkg" -type f -name "*.json"       -exec chmod 644 {} \;
+          find "$luci_pkg/etc/uci-defaults" -type f -exec chmod 755 {} \;
+
+          luci_ctl="/tmp/ctl-luci"
+          mkdir -p "$luci_ctl"
+          {
+            printf 'Package: luci-app-%s\n'       "$PKG_NAME"
+            printf 'Version: %s\n'                "$VER"
+            printf 'Architecture: all\n'
+            printf 'Maintainer: Apex <noreply@apex.local>\n'
+            printf 'Section: luci\n'
+            printf 'Priority: optional\n'
+            printf 'Depends: %s, luci-base, luci-compat\n' "$PKG_NAME"
+            printf 'Description: LuCI web interface for %s (mihomo).\n' "$APP_NAME"
+          } > "$luci_ctl/control"
+          {
+            printf '#!/bin/sh\n'
+            printf '[ -n "${IPKG_INSTROOT}" ] && exit 0\n'
+            # ✅ 写入应用显示名称到 UCI 配置（LuCI 菜单显示）
+            printf 'uci -q get mihomo.config >/dev/null 2>&1 || uci set mihomo.config=config\n'
+            printf 'uci set mihomo.config.app_name="%s"\n' "$APP_NAME"
+            printf 'uci commit mihomo\n'
+            # 清 LuCI 缓存
+            printf 'rm -f /tmp/luci-indexcache /tmp/luci-indexcache.*\n'
+            printf 'rm -rf /tmp/luci-modulecache/\n'
+            # reload rpcd 以生效新 ACL
+            printf '/etc/init.d/rpcd reload 2>/dev/null || true\n'
+            # reload uhttpd 让 LuCI 重新加载 controller
+            printf '/etc/init.d/uhttpd reload 2>/dev/null || /etc/init.d/uhttpd restart 2>/dev/null || true\n'
+            printf 'exit 0\n'
+          } > "$luci_ctl/postinst"
+          chmod 755 "$luci_ctl/postinst"
+
+          (cd "$luci_ctl" && tar czf /tmp/control.tar.gz ./control ./postinst)
+          (cd "$luci_pkg" && tar czf /tmp/data.tar.gz .)
+          echo "2.0" > /tmp/debian-binary
+
+          luci_ipk="luci-app-${PKG_NAME}_${VER}_all.ipk"
+          (cd /tmp && tar czf "$GITHUB_WORKSPACE/dist/$luci_ipk" ./debian-binary ./control.tar.gz ./data.tar.gz)
+          rm -rf "$luci_pkg" "$luci_ctl" /tmp/control.tar.gz /tmp/data.tar.gz /tmp/debian-binary
+
+          echo "=== All OpenWrt packages ==="
+          ls -lh dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-openwrt
+          path: dist/*
+          compression-level: 0
+
+      # ── OpenWrt 构建完成通知 ──
+      - name: Notify Telegram
+        if: |
+          always() &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.notify_chat_id != ''
+        env:
+          BOT_TOKEN:  ${{ secrets.BUILD_BOT_TOKEN }}
+          CHAT_ID:    ${{ inputs.notify_chat_id }}
+          RUN_URL:    ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+          PYTHONUTF8: "1"
+        run: |
+          python3 -X utf8 - << 'PYEOF'
+          import os, sys, json, urllib.request
+          from pathlib import Path
+
+          bot_token = os.environ.get("BOT_TOKEN", "").strip()
+          if not bot_token:
+              sys.exit(0)
+
+          chat_id    = os.environ.get("CHAT_ID", "").strip()
+          run_url    = os.environ.get("RUN_URL", "").strip()
+          job_status = os.environ.get("JOB_STATUS", "").strip()
+          API        = f"https://api.telegram.org/bot{bot_token}"
+          label      = "📡 OpenWrt"
+
+          def send_json(endpoint, data):
+              req = urllib.request.Request(
+                  f"{API}/{endpoint}",
+                  data=json.dumps(data).encode("utf-8"),
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      return json.loads(r.read())
+              except Exception as e:
+                  print(f"[notify] {endpoint} error: {e}")
+                  return {}
+
+          if job_status == "success":
+              dist = Path("dist")
+              files = sorted(f.name for f in dist.rglob("*") if f.is_file()) if dist.exists() else []
+              file_list = "\n".join(f"• `{f}`" for f in files) if files else "（无文件）"
+              msg = f"✅ *{label}* 构建完成（3 个架构 + LuCI）\n\n{file_list}\n\n🔗 [前往 Actions 下载]({run_url})\n⚠️ 需登录 GitHub 账号"
+          else:
+              msg = f"❌ *{label}* 构建失败 — [查看日志]({run_url})"
+
+          send_json("sendMessage", {
+              "chat_id": chat_id,
+              "text": msg,
+              "parse_mode": "Markdown",
+              "disable_web_page_preview": True,
+          })
+          PYEOF
+
+  # ── Release：打 tag 时自动发布到本公共仓库 ──────────────────
+  release:
+    needs: [build, openwrt]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./dist/
+          pattern: artifact-*
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd ./dist
+          for file in $(find . -type f -not -name "*.sha256"); do
+            sha256sum "$file" > "${file}.sha256"
+          done
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./dist/*
+          generate_release_notes: true
