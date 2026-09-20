@@ -165,7 +165,7 @@ on:
       #    bot 侧 json.dumps 打包,CI 用 fromJSON(inputs.mw || '{}').xxx 展开。
       #    aes_key 必须与中间件 .env 的 AES_KEY 一字不差;api_prefix 也要与中间件 API_PREFIX 一致。
       mw:
-        description: 'encrypt-middleware 配置 JSON,如 {"enabled":"true","aes_key":"...","path_prefix":"","sub_prefix":"","ext":""};留空/{}=不启用'
+        description: '可选参数 JSON(顶层 input 已满 25 个)。中间件:{"enabled","aes_key","path_prefix","sub_prefix","ext"};安全:{"allowed_domains":"a.com,b.net","allow_insecure_tls":"false"};留空/{}=全部默认'
         required: false
         default: '{}'
 
@@ -321,6 +321,9 @@ jobs:
         # run: 等于把值当代码拼，一个双引号就能注入命令（见 tests/test_input_hardening.py）
         env:
           SRC_REPO: ${{ inputs.source_repo || secrets.PRIVATE_REPO_NAME }}
+          # 机场主这次有没有要求开启(见下面 check_optional)。同样走 env,不内插进 run:。
+          WANT_ALLOWED_DOMAINS:    ${{ fromJSON(inputs.mw || '{}').allowed_domains }}
+          WANT_ALLOW_INSECURE_TLS: ${{ fromJSON(inputs.mw || '{}').allow_insecure_tls }}
         run: |
           set -euo pipefail
           REQUIRED="XOR_KEY APEX_FLAG ENABLE_ENCRYPTION OSS_URL_1 OSS_URL_2 \
@@ -345,6 +348,27 @@ jobs:
             exit 1
           fi
           echo "✅ dart-define 契约齐全 ($(echo $REQUIRED | wc -w) 个参数)"
+
+          # ── 安全开关:只在**真的要用**时才要求源码支持 ──
+          # 这两个键是 2026-09-21 才接通的。bot 打的可能是更早的 tag(ref 由线上设置决定),
+          # 那些版本的 setup.dart 里没有它们。无条件要求 = 所有旧 tag 的打包立刻全挂。
+          # 但也不能一律放行:机场主明确要求开白名单/严格 TLS,而源码传不进去,包会**在没有
+          # 保护的情况下**照常发出去,且无任何提示 —— 这是静默的安全降级,比打包失败糟得多。
+          # 所以:没要求 → 旧版本照常过;要求了但不支持 → 明确拦下。
+          check_optional() {  # $1=键名  $2=机场主给的值
+            [ -z "$2" ] && return 0
+            grep -q "'$1'" setup.dart && return 0
+            echo "::error::要求启用 $1,但源码仓 \"$SRC_REPO\" 的这个版本不支持它"
+            echo ""
+            echo "该版本的 setup.dart 不会把 $1 转成 dart-define,客户端会按默认值(不启用)编译 ——"
+            echo "打出来的包**没有**你要求的保护,而且不会有任何提示。"
+            echo ""
+            echo "修法(二选一):① 把打包 ref 切到支持它的版本(setup.dart 里有 _kDartDefineKeys 的,2026-09-21 之后);"
+            echo "             ② 暂时清空该选项,按无保护方式出包。"
+            exit 1
+          }
+          check_optional APEX_ALLOWED_DOMAINS "$WANT_ALLOWED_DOMAINS"
+          check_optional ALLOW_INSECURE_TLS   "$WANT_ALLOW_INSECURE_TLS"
 
       # ── 2. 注入构建参数（仅 workflow_dispatch 触发时执行）────
       - name: Inject build parameters
@@ -1433,6 +1457,20 @@ jobs:
           APEX_MW_PATH_PREFIX: ${{ fromJSON(inputs.mw || '{}').path_prefix }}
           APEX_MW_SUB_PREFIX:  ${{ fromJSON(inputs.mw || '{}').sub_prefix }}
           APEX_MW_EXT:         ${{ fromJSON(inputs.mw || '{}').ext }}
+          # 【安全开关 · 2026-09-21 接通】同样从 mw 那个 JSON 串展开 —— 顶层 input 已经顶满
+          # 25 个上限,加不进新的。mw 这个名字是历史原因(最初只装中间件参数),现在它就是
+          # "装不下的可选参数"的统一口袋。缺键 → null → 空串 → setup.dart 跳过 → 客户端默认。
+          #
+          # APEX_ALLOWED_DOMAINS:面板域名白名单(逗号分隔的域名后缀)。远程配置(OSS)被篡改
+          #   时,凭证只发给白名单内的域,越界丢弃。空 = 不启用。
+          #   ⚠️ 代价:机场主将来换到**全新**的域名(不在名单内),老包就连不上了,得重新发包。
+          # ALLOW_INSECURE_TLS:传 "false" = 严格校验证书。空 = 默认宽松(接受任何证书)。
+          #   ⚠️ 面板证书链不规范(缺中间证/自签/IP 直连)的机场传 false 会登录不上。
+          #
+          # 这两个在客户端里早就写好了,注释也写着"打包时传这个就能开",但 setup.dart 的转发
+          # 名单和这里都没有它们 —— 于是从来没有任何一个包能开启(2026-09-21 审计)。
+          APEX_ALLOWED_DOMAINS: ${{ fromJSON(inputs.mw || '{}').allowed_domains }}
+          ALLOW_INSECURE_TLS:   ${{ fromJSON(inputs.mw || '{}').allow_insecure_tls }}
           ANDROID_FLAVOR: ${{ matrix.flavor || '' }}
           # ↓ setup.dart::Build.mihomoTag 读这个，触发 mihomo 源码 patch + ldflags 注入
           MIHOMO_TAG: ${{ env.MIHOMO_TAG }}
