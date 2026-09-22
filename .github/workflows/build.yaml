@@ -1864,11 +1864,19 @@ jobs:
           BINARY_EXE=$(sed -n 's/.*set(BINARY_NAME[[:space:]]*"\([^"]*\)").*/\1/p' windows/CMakeLists.txt 2>/dev/null)
           BINARY_EXE="${BINARY_EXE:-Apex}"
 
+          # 数据目录 %APPDATA%\<CompanyName>\<ProductName> 的 CompanyName:setup.dart 已把
+          # Runner.rc 改成品牌包名。卸载器按它删用户数据(原来写死 com.apex.vpn,品牌包删不到)。
+          # 只允许包名字符,读不到回落默认(与 iss 的 #ifndef 默认值一致)。
+          PKG_NAME=$(sed -n 's/.*VALUE "CompanyName", "\([^"]*\)".*/\1/p' windows/runner/Runner.rc 2>/dev/null | head -1)
+          if ! printf '%s' "$PKG_NAME" | grep -Eq '^[A-Za-z][A-Za-z0-9_.]{0,127}$'; then
+            PKG_NAME="com.apex.vpn"
+          fi
+
           # 从 app_name SHA256 前 32 位生成稳定 GUID（同名每次固定）
           HASH=$(echo -n "$APP_NAME" | sha256sum | cut -c1-32 | tr '[:lower:]' '[:upper:]')
           APP_UUID="${HASH:0:8}-${HASH:8:4}-${HASH:12:4}-${HASH:16:4}-${HASH:20:12}"
 
-          echo "Inno: AppName=$APP_NAME  BinaryExe=$BINARY_EXE  AppVersion=$APP_VERSION  AppId=$APP_UUID"
+          echo "Inno: AppName=$APP_NAME  BinaryExe=$BINARY_EXE  Package=$PKG_NAME  AppVersion=$APP_VERSION  AppId=$APP_UUID"
 
           if [ -f "update_installer.iss" ]; then
             mkdir -p dist
@@ -1877,6 +1885,7 @@ jobs:
             MSYS_NO_PATHCONV=1 ISCC.exe \
               "/DMyAppName=$APP_NAME" \
               "/DMyBinaryName=$BINARY_EXE" \
+              "/DMyPackageName=$PKG_NAME" \
               "/DMyAppVersion=$APP_VERSION" \
               "/DMyAppId=$APP_UUID" \
               update_installer.iss
