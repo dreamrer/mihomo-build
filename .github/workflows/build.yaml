@@ -324,6 +324,8 @@ jobs:
           # 机场主这次有没有要求开启(见下面 check_optional)。同样走 env,不内插进 run:。
           WANT_ALLOWED_DOMAINS:    ${{ fromJSON(inputs.mw || '{}').allowed_domains }}
           WANT_ALLOW_INSECURE_TLS: ${{ fromJSON(inputs.mw || '{}').allow_insecure_tls }}
+          WANT_UI:                 ${{ fromJSON(inputs.mw || '{}').ui }}
+          WANT_BRAND_COLOR:        ${{ fromJSON(inputs.mw || '{}').brand_color }}
         run: |
           set -euo pipefail
           REQUIRED="XOR_KEY APEX_FLAG ENABLE_ENCRYPTION OSS_URL_1 OSS_URL_2 \
@@ -369,6 +371,38 @@ jobs:
           }
           check_optional APEX_ALLOWED_DOMAINS "$WANT_ALLOWED_DOMAINS"
           check_optional ALLOW_INSECURE_TLS   "$WANT_ALLOW_INSECURE_TLS"
+
+          # ── 界面风格(APEX_UI,2026-09-22)──
+          # 经典款(classic)是默认,选它等于没选,旧版本照常过。选了别的:
+          #   · 名字只许小写字母和数字(会进 dart-define,也用来拼目录名);
+          #   · 这个版本的源码得认 APEX_UI,否则客户端按经典款编译 —— 机场主挑了光环,
+          #     拿到的却是经典款,且没有任何提示;
+          #   · 源码里得真有 lib/ui/<id>/(客户端对不认识的 id 会回落经典款,同样是静默变样)。
+          if [ -n "$WANT_UI" ] && [ "$WANT_UI" != "classic" ]; then
+            if ! printf '%s' "$WANT_UI" | grep -Eq '^[a-z0-9]{1,32}$'; then
+              echo "::error::界面风格名不合法: \"$WANT_UI\"(只允许小写字母和数字)"
+              exit 1
+            fi
+            check_optional APEX_UI "$WANT_UI"
+            if [ ! -d "lib/ui/$WANT_UI" ]; then
+              echo "::error::源码仓 \"$SRC_REPO\" 的这个版本里没有界面风格 \"$WANT_UI\"(缺 lib/ui/$WANT_UI/)"
+              echo "打出来会是经典款。请把打包 ref 切到包含它的版本,或改选其他界面风格。"
+              exit 1
+            fi
+            echo "✅ 界面风格: $WANT_UI"
+          fi
+
+          # ── 品牌主色(APEX_BRAND_COLOR,2026-09-22)── 只影响光环/品牌半屏。
+          # 格式不对就拦下(值进 dart-define);源码不认这个参数也拦下 —— 机场主填了颜色、包里却是
+          # 默认色,和界面风格一样是"静默变样"。
+          if [ -n "$WANT_BRAND_COLOR" ]; then
+            if ! printf '%s' "$WANT_BRAND_COLOR" | grep -Eq '^#?[0-9A-Fa-f]{6}$'; then
+              echo "::error::品牌主色格式不对: \"$WANT_BRAND_COLOR\"(要 6 位十六进制,如 FF6A00)"
+              exit 1
+            fi
+            check_optional APEX_BRAND_COLOR "$WANT_BRAND_COLOR"
+            echo "✅ 品牌主色: $WANT_BRAND_COLOR"
+          fi
 
       # ── 2. 注入构建参数（仅 workflow_dispatch 触发时执行）────
       - name: Inject build parameters
@@ -1471,6 +1505,10 @@ jobs:
           # 名单和这里都没有它们 —— 于是从来没有任何一个包能开启(2026-09-21 审计)。
           APEX_ALLOWED_DOMAINS: ${{ fromJSON(inputs.mw || '{}').allowed_domains }}
           ALLOW_INSECURE_TLS:   ${{ fromJSON(inputs.mw || '{}').allow_insecure_tls }}
+          # 界面风格(lib/ui/<id>/),同样走 mw 口袋。空 = 经典款。上面的契约检查已校验过。
+          APEX_UI:              ${{ fromJSON(inputs.mw || '{}').ui }}
+          # 品牌主色 RRGGBB,同样走 mw 口袋。空 = Apex 默认色。
+          APEX_BRAND_COLOR:     ${{ fromJSON(inputs.mw || '{}').brand_color }}
           ANDROID_FLAVOR: ${{ matrix.flavor || '' }}
           # ↓ setup.dart::Build.mihomoTag 读这个，触发 mihomo 源码 patch + ldflags 注入
           MIHOMO_TAG: ${{ env.MIHOMO_TAG }}
