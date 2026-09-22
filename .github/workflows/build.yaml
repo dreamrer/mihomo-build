@@ -1910,6 +1910,51 @@ jobs:
           echo "=== dist/ contents ==="
           ls -la dist/ 2>/dev/null || echo "[dist/ not found]"
 
+      # ── 13b. 更新包签名(Ed25519)────────────────────────────
+      # 【2026-09-23】客户端 update_signature.dart 早就会验签,可打包链里**从来
+      # 没有过签名步骤**(上面那句"私钥只在下方签名步骤用"是空头支票):OSS 配置里
+      # 永远没有 sig,UPDATE_REQUIRE_SIGNATURE 又默认 false → 验签一直等于没开,
+      # OSS 被攻陷/机场主恶意时照样能下发任意更新包(Windows 上=静默 RCE)。
+      #
+      # 没配 UPDATE_PRIVKEY_ED25519 这个 secret → 整步跳过,现有打包零影响。
+      # 配了 → 每个产物生成 <文件名>.sig,并汇总到 dist/UPDATE_SIGNATURES.txt,
+      # 机场主把里面的 sig 填进 OSS updateConfig 对应平台的 `sig` 字段即可。
+      # 私钥只经环境变量进签名工具(命令行参数会出现在 ps 里)。
+      # if 用 secrets 上下文直接判(step 级 env 能不能在自己的 if 里读到,
+      # 各版本 runner 行为有过出入;secrets 在 step if 里是明确可用的)。
+      - name: Sign update packages (Ed25519)
+        if: ${{ secrets.UPDATE_PRIVKEY_ED25519 != '' }}
+        env:
+          UPDATE_PRIVKEY_ED25519: ${{ secrets.UPDATE_PRIVKEY_ED25519 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          summary="dist/UPDATE_SIGNATURES.txt"
+          : > "$summary"
+          shopt -s nullglob
+          for f in dist/*; do
+            case "$f" in
+              *.sha256|*.sig|"$summary") continue ;;
+            esac
+            [ -f "$f" ] || continue
+            out="$(dart run tool/sign_update.dart sign "$f")"
+            sha="$(printf '%s\n' "$out" | awk '/^SHA256/{print $NF}')"
+            sig="$(printf '%s\n' "$out" | awk '/^SIG/{print $NF}')"
+            if [ -z "$sig" ]; then
+              echo "::error::签名失败: $f"
+              exit 1
+            fi
+            printf '%s\n' "$sig" > "$f.sig"
+            {
+              echo "file:   $(basename "$f")"
+              echo "sha256: $sha"
+              echo "sig:    $sig"
+              echo
+            } >> "$summary"
+          done
+          echo "== 已签名 =="
+          cat "$summary"
+
       # ── 14. 上传构建产物 ──────────────────────────────────────
       - name: Upload artifact
         if: |
@@ -2063,7 +2108,9 @@ jobs:
               dist = Path("dist")
               all_files = sorted(
                   f for f in dist.rglob("*")
-                  if f.is_file() and not f.name.endswith(".sha256")
+                  if f.is_file()
+                  and not f.name.endswith((".sha256", ".sig"))
+                  and f.name != "UPDATE_SIGNATURES.txt"
               ) if dist.exists() else []
 
               file_list = "\n".join(f"• `{f.name}`" for f in all_files) if all_files else "（无文件）"
@@ -2407,7 +2454,8 @@ jobs:
       - name: Generate SHA256 checksums
         run: |
           cd ./dist
-          for file in $(find . -type f -not -name "*.sha256"); do
+          # .sig / 签名汇总不参与校验和(否则会生成 xxx.sig.sha256 这种噪音)
+          for file in $(find . -type f -not -name "*.sha256" -not -name "*.sig" -not -name "UPDATE_SIGNATURES.txt"); do
             sha256sum "$file" > "${file}.sha256"
           done
 
