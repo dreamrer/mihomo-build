@@ -845,6 +845,76 @@ jobs:
                   img = _download_logo(logo_url)
                   print(f'[inject] Logo 下载成功: {img.size}')
 
+                  def _trim_for_inapp(src, tol=14, min_trim=0.06, min_content=0.20, margin=0.10,
+                                      min_keep=0.45):
+                      im = src.convert('RGBA')
+                      w, h = im.size
+                      # 小图裁完只会更糊(16×16 会被裁成 8×8 再放大到 1024)。
+                      if w < 128 or h < 128:
+                          return src
+                      # 纯 python 双重循环,8192² 本机实测 28s、runner 上更久,且每个平台各跑一遍。
+                      # 这么大的图也没有裁边的必要(最终产物最大 1024)。
+                      if w * h > 4096 * 4096:
+                          print(f'[inject] logo 太大({w}x{h}),跳过自动裁边')
+                          return src
+                      px = im.load()
+
+                      def close(a, b):
+                          # 两边都透明就算同色(透明像素的 RGB 可能是垃圾值)
+                          if a[3] <= 8 and b[3] <= 8:
+                              return True
+                          return all(abs(a[i] - b[i]) <= tol for i in range(4))
+
+                      corners = [px[0, 0], px[w - 1, 0], px[0, h - 1], px[w - 1, h - 1]]
+                      if not all(close(corners[0], c) for c in corners[1:]):
+                          return src  # 四角不同色 = 满幅/渐变作品,没有"边"可裁
+                      bg = corners[0]
+                      left, right, top, bottom = w, -1, h, -1
+                      for y in range(h):
+                          hit = None
+                          for x in range(w):
+                              if not close(px[x, y], bg):
+                                  if hit is None:
+                                      hit = x
+                                      if x < left:
+                                          left = x
+                                  if x > right:
+                                      right = x
+                          if hit is not None:
+                              if y < top:
+                                  top = y
+                              bottom = y
+                      if right < 0:
+                          return src  # 整张都是背景色
+                      cw, ch = right - left + 1, bottom - top + 1
+                      if cw < w * min_content or ch < h * min_content:
+                          return src  # 内容太小,多半判错了,别毁图
+                      trim_ratio = min(left, top, w - 1 - right, h - 1 - bottom) / float(min(w, h))
+                      if trim_ratio < min_trim:
+                          return src
+                      # 留余量:① 不切掉抗锯齿边;② App 内的 logo 控件还会按圆角再裁一次
+                      #(ApexLogo 圆角半径 26%),贴边的内容会被切掉边角。
+                      pad = int(max(cw, ch) * margin)
+                      side = max(cw, ch) + pad * 2
+                      if side >= min(w, h):
+                          # 两种情况会走到这:①原图留白本来就不多(加回余量反而更大);
+                          # ②**非方形**上传图(方形裁切会切掉宽边的内容)。都不动。
+                          return src
+                      # 【别把小内容放大成糊图 · 2026-09-23 审计】min_content 只挡住了
+                      # "内容 < 20%",而 20.0% 正好过关时 side 只有原图的 24% —— 之后
+                      # LANCZOS 放大 4 倍多到 1024,登录页/启动屏肉眼可见地糊。
+                      # 裁完必须还剩得下:不小于原图短边的 45%,且不小于 256px。
+                      if side < min(w, h) * min_keep or side < 256:
+                          print(f'[inject] 裁边后只剩 {side}px(原图 {w}x{h}),放大会糊,不裁')
+                          return src
+                      cx, cy = left + cw // 2, top + ch // 2
+                      x0, y0 = cx - side // 2, cy - side // 2
+                      x1, y1 = x0 + side, y0 + side
+                      out = Image.new('RGBA', (side, side), bg if bg[3] > 8 else (0, 0, 0, 0))
+                      out.paste(im.crop((max(x0, 0), max(y0, 0), min(x1, w), min(y1, h))),
+                                (max(0, -x0), max(0, -y0)))
+                      return out
+
                   # ── Android mipmap ──────────────────────────
                   # Android 图标不加圆角（系统启动器会自动做 mask 裁切）
                   # 仅做 resize + 合成白底（防止透明背景在某些启动器上显示为纯黑）
@@ -856,45 +926,71 @@ jobs:
                           return bg.convert('RGB')
                       return ri.convert('RGB')
 
-                  # 用户上传了自定义 Logo 时：
-                  # 1. 删除 adaptive icon XML（mipmap-anydpi-v26），让系统回退到普通 mipmap
-                  # 2. 删除 foreground 图层文件
-                  # 3. 删除 ic_launcher_background 颜色资源
-                  # 这样 Android 会直接使用我们替换的 webp/png 图标
-                  for xml_f in _glob.glob('android/app/src/main/res/mipmap-anydpi*/ic_launcher*.xml'):
-                      Path(xml_f).unlink()
-                      print(f'[inject] 删除 adaptive XML: {xml_f}')
-                  for fg_f in _glob.glob('android/app/src/main/res/mipmap-*/ic_launcher_foreground.*'):
-                      Path(fg_f).unlink()
-                      print(f'[inject] 删除 foreground: {fg_f}')
+                  # 【自适应图标 · 2026-09-23 重做】原来的做法是"删掉 adaptive XML +
+                  # 删 foreground + 删颜色资源 + 删 windowSplashScreenAnimatedIcon",
+                  # 让系统回退到我们替换的方形位图。后果:
+                  #  · 桌面:Pixel/三星等启动器对非自适应图标一律裁圆 → 方形 logo 被切角;
+                  #  · Android 12+ 启动第一屏:图标行被删 → 整屏只剩一块底色,什么都没有
+                  #    (而 values-night-v27 没被改,深色模式下反而还有图标,两边不一致)。
+                  # 现在改成**生成真正的自适应图标**:foreground = 裁边后的 logo 缩到画布
+                  # 60%(Android 的安全区是中心 66%,取 60% 留余量),background = 从 logo
+                  # 四角取的底色。这样启动器怎么 mask 都切不到内容,Android 12 splash 也能
+                  # 直接用 foreground + IconBackgroundColor 正常显示。
+                  _logo_trimmed = _trim_for_inapp(img)
+
+                  def _adaptive_bg_color(src):
+                      """自适应图标的背景色:取 logo 四角(它们同色时就是它的底色);
+                      透明底的 logo 用白色(和 legacy 位图合成白底保持一致)。"""
+                      im = src.convert('RGBA')
+                      w, h = im.size
+                      cs = [im.getpixel((0, 0)), im.getpixel((w - 1, 0)),
+                            im.getpixel((0, h - 1)), im.getpixel((w - 1, h - 1))]
+                      a = cs[0]
+                      if a[3] <= 8:
+                          return (255, 255, 255)
+                      for c in cs[1:]:
+                          if any(abs(a[i] - c[i]) > 24 for i in range(3)):
+                              return (255, 255, 255)   # 四角不同色 = 满幅作品,别猜
+                      return (a[0], a[1], a[2])
+
+                  _ad_bg = _adaptive_bg_color(img)
+                  # foreground:整块画布,内容居中占 60%
+                  for folder, canvas in {
+                      'mipmap-mdpi': 108, 'mipmap-hdpi': 162, 'mipmap-xhdpi': 216,
+                      'mipmap-xxhdpi': 324, 'mipmap-xxxhdpi': 432,
+                  }.items():
+                      base = Path(f'android/app/src/main/res/{folder}')
+                      if not base.exists():
+                          continue
+                      inner = int(canvas * 0.60)
+                      fg = Image.new('RGBA', (canvas, canvas), (0, 0, 0, 0))
+                      content = _logo_trimmed.convert('RGBA').resize((inner, inner), Image.LANCZOS)
+                      off = (canvas - inner) // 2
+                      fg.paste(content, (off, off), content)
+                      wrote = False
+                      for ext, fmt in [('webp', 'WEBP'), ('png', 'PNG')]:
+                          f = base / f'ic_launcher_foreground.{ext}'
+                          if f.exists():
+                              fg.save(f, format=fmt)
+                              print(f'[inject] adaptive foreground: {f}')
+                              wrote = True
+                      if not wrote:
+                          fg.save(base / 'ic_launcher_foreground.webp', format='WEBP')
+                          print(f'[inject] adaptive foreground (新建): {base}/ic_launcher_foreground.webp')
+
+                  # 背景色资源:ic_launcher_bg 给自适应图标用,ic_launcher_background 是
+                  # 旧的 splash 底色(现在 styles 已改用 @color/apex_bg,留着防别处引用)。
                   bg_xml = Path('android/app/src/main/res/values/ic_launcher_background.xml')
-                  if bg_xml.exists():
-                      bg_xml.unlink()
-                      print(f'[inject] 删除 ic_launcher_background.xml')
-                  # 修复 values-v27/styles.xml 中对已删除颜色资源的引用
-                  # 同时移除 windowSplashScreenAnimatedIcon——Android 12+ 的 splash API
-                  # 会把这个 icon 强制放大 1.5× 并裁成内圆，自定义 logo 没 safe zone
-                  # 就被切掉边角；删掉这一行让 splash 只显示背景色，干净。
-                  v27_styles = Path('android/app/src/main/res/values-v27/styles.xml')
-                  if v27_styles.exists():
-                      txt = v27_styles.read_text()
-                      changed = False
-                      if '@color/ic_launcher_background' in txt:
-                          txt = txt.replace('@color/ic_launcher_background', '#FAFAFA')
-                          changed = True
-                          print('[inject] 修复 values-v27/styles.xml → 硬编码 #FAFAFA')
-                      # 删 splash icon 行（多种缩进/换行写法都能命中）
-                      new_txt = re.sub(
-                          r'\s*<item name="android:windowSplashScreenAnimatedIcon"[^>]*>[^<]*</item>',
-                          '',
-                          txt,
-                      )
-                      if new_txt != txt:
-                          txt = new_txt
-                          changed = True
-                          print('[inject] 移除 windowSplashScreenAnimatedIcon → splash 只显示背景色，避免 logo 被裁')
-                      if changed:
-                          v27_styles.write_text(txt)
+                  _hex = '#%02X%02X%02X' % _ad_bg
+                  bg_xml.parent.mkdir(parents=True, exist_ok=True)
+                  bg_xml.write_text(
+                      '<?xml version="1.0" encoding="utf-8"?>\n'
+                      '<resources>\n'
+                      '    <color name="ic_launcher_background">#FAFAFA</color>\n'
+                      f'    <color name="ic_launcher_bg">{_hex}</color>\n'
+                      '</resources>\n'
+                  )
+                  print(f'[inject] 自适应图标背景色 ic_launcher_bg = {_hex}')
 
                   for folder, size in {
                       'mipmap-mdpi': 48, 'mipmap-hdpi': 72,
@@ -1051,76 +1147,6 @@ jobs:
                   # 这圈安全区(启动器会按圆/圆角 mask 裁),但**App 内**展示时就显得
                   # "logo 没填充满" —— 登录页那个白卡片里一个小火箭就是这么来的。
                   # 这里只对 assets/images/* 裁边,launcher/mipmap 那几路原样保留。
-                  def _trim_for_inapp(src, tol=14, min_trim=0.06, min_content=0.20, margin=0.10,
-                                      min_keep=0.45):
-                      im = src.convert('RGBA')
-                      w, h = im.size
-                      # 小图裁完只会更糊(16×16 会被裁成 8×8 再放大到 1024)。
-                      if w < 128 or h < 128:
-                          return src
-                      # 纯 python 双重循环,8192² 本机实测 28s、runner 上更久,且每个平台各跑一遍。
-                      # 这么大的图也没有裁边的必要(最终产物最大 1024)。
-                      if w * h > 4096 * 4096:
-                          print(f'[inject] logo 太大({w}x{h}),跳过自动裁边')
-                          return src
-                      px = im.load()
-
-                      def close(a, b):
-                          # 两边都透明就算同色(透明像素的 RGB 可能是垃圾值)
-                          if a[3] <= 8 and b[3] <= 8:
-                              return True
-                          return all(abs(a[i] - b[i]) <= tol for i in range(4))
-
-                      corners = [px[0, 0], px[w - 1, 0], px[0, h - 1], px[w - 1, h - 1]]
-                      if not all(close(corners[0], c) for c in corners[1:]):
-                          return src  # 四角不同色 = 满幅/渐变作品,没有"边"可裁
-                      bg = corners[0]
-                      left, right, top, bottom = w, -1, h, -1
-                      for y in range(h):
-                          hit = None
-                          for x in range(w):
-                              if not close(px[x, y], bg):
-                                  if hit is None:
-                                      hit = x
-                                      if x < left:
-                                          left = x
-                                  if x > right:
-                                      right = x
-                          if hit is not None:
-                              if y < top:
-                                  top = y
-                              bottom = y
-                      if right < 0:
-                          return src  # 整张都是背景色
-                      cw, ch = right - left + 1, bottom - top + 1
-                      if cw < w * min_content or ch < h * min_content:
-                          return src  # 内容太小,多半判错了,别毁图
-                      trim_ratio = min(left, top, w - 1 - right, h - 1 - bottom) / float(min(w, h))
-                      if trim_ratio < min_trim:
-                          return src
-                      # 留余量:① 不切掉抗锯齿边;② App 内的 logo 控件还会按圆角再裁一次
-                      #(ApexLogo 圆角半径 26%),贴边的内容会被切掉边角。
-                      pad = int(max(cw, ch) * margin)
-                      side = max(cw, ch) + pad * 2
-                      if side >= min(w, h):
-                          # 两种情况会走到这:①原图留白本来就不多(加回余量反而更大);
-                          # ②**非方形**上传图(方形裁切会切掉宽边的内容)。都不动。
-                          return src
-                      # 【别把小内容放大成糊图 · 2026-09-23 审计】min_content 只挡住了
-                      # "内容 < 20%",而 20.0% 正好过关时 side 只有原图的 24% —— 之后
-                      # LANCZOS 放大 4 倍多到 1024,登录页/启动屏肉眼可见地糊。
-                      # 裁完必须还剩得下:不小于原图短边的 45%,且不小于 256px。
-                      if side < min(w, h) * min_keep or side < 256:
-                          print(f'[inject] 裁边后只剩 {side}px(原图 {w}x{h}),放大会糊,不裁')
-                          return src
-                      cx, cy = left + cw // 2, top + ch // 2
-                      x0, y0 = cx - side // 2, cy - side // 2
-                      x1, y1 = x0 + side, y0 + side
-                      out = Image.new('RGBA', (side, side), bg if bg[3] > 8 else (0, 0, 0, 0))
-                      out.paste(im.crop((max(x0, 0), max(y0, 0), min(x1, w), min(y1, h))),
-                                (max(0, -x0), max(0, -y0)))
-                      return out
-
                   assets_img = Path('assets/images')
                   if assets_img.exists():
                       _inapp = _trim_for_inapp(img)
