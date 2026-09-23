@@ -1461,6 +1461,12 @@ jobs:
           flutter-version: '3.44.9'
           channel: 'stable'
           cache: true
+          # 【换缓存 key · 2026-09-23】原来的三条腿缓存都是 2026-08-07 建的,正好落在
+          # "git 的 insteadOf 还是无条件改写"那段时期 —— 缓存里的 SDK 很可能带着被改写
+          # 成 `https://x-access-token:<token>@github.com/...` 的 git remote,
+          # Windows 腿今天就被凭据闸门拦在这儿。加个盐强制重新下载一份干净的。
+          # (旧缓存 GitHub 会自己按 LRU/7天 淘汰;要立刻清掉见下方说明。)
+          cache-key: 'flutter-clean2-:os:-:channel:-:version:-:arch:-:hash:'
 
       # ── 7b. 源头闸门:Flutter 版本串不许带凭据 ─────────────────
       # 【2026-09-23】token 当初就是从这里进包的:git 的全局 insteadOf 把
@@ -1471,10 +1477,32 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+          # 【脱敏后要打印出来 · 2026-09-23】这道闸门原来命中就只说"带着凭据"、
+          # 什么都不打印,理由是"内容本身就是凭据"。结果 Windows 腿真的红了,而我们
+          # **无从判断**它抓到的是真泄露还是误报 —— 一道不可诊断的闸门,挡住构建时
+          # 和假阳性没区别。现在改成:把 token 形态的串替换成 ***，再把上下文打出来。
+          # (GitHub 本身也会把注册过的 secret 自动打成 ***，这里是再加一层,
+          #  覆盖那些不是 secret、但长得像 token 的串。)
+          mask() {
+            sed -E \
+              -e 's#(x-access-token:)[^@]*(@)#\1***\2#g' \
+              -e 's#(https://)[^/@:]+:[^@]*(@)#\1***:***\2#g' \
+              -e 's#gh[psoru]_[A-Za-z0-9]{10,}#gh?_***#g' \
+              -e 's#github_pat_[A-Za-z0-9_]{10,}#github_pat_***#g'
+          }
           ver="$(flutter --version 2>&1 || true)"
           if printf '%s' "$ver" | grep -qE 'x-access-token|ghp_[A-Za-z0-9]{20,}|ghs_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}'; then
-            echo "::error::Flutter 版本串里带着凭据 —— git 的 insteadOf 改写范围又放宽了。"
-            echo "::error::(不打印内容,那就是凭据本身)"
+            echo "::error::Flutter 版本串里带着凭据 —— git 的 insteadOf 改写范围又放宽了,或者缓存里的 SDK 是污染期留下的。"
+            echo "--- 命中的行(已脱敏)---"
+            # `|| true`:runner 的 shell 带 -e -o pipefail,grep 没命中会直接中断,
+            # 后面两段诊断就打不出来了(而我们正是为了诊断才加的)。
+            printf '%s\n' "$ver" \
+              | grep -nE 'x-access-token|ghp_[A-Za-z0-9]{20,}|ghs_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}' \
+              | mask || true
+            echo "--- 当前全局 insteadOf 规则(已脱敏)---"
+            git config --global --get-regexp 'url\..*\.insteadOf' | mask || true
+            echo "--- Flutter SDK 的 git remote(已脱敏)---"
+            git -C "${FLUTTER_ROOT:-/nonexistent}" remote -v 2>/dev/null | mask || echo "(读不到)"
             exit 1
           fi
           # 顺带确认全局改写只覆盖我们自己的 owner
