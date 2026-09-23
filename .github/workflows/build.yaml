@@ -253,6 +253,13 @@ jobs:
     if: needs.setup.outputs.has_matrix == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    # 【step 级 if 里用不了 secrets · 2026-09-23 实证】GitHub 的 workflow parser
+    # (actions/languageservices 的 workflow-v1.0.json)里 step-if 的允许上下文是
+    # github/inputs/vars/needs/strategy/matrix/steps/job/runner/env —— **没有 secrets**;
+    # 写了会整份文件非法(Unrecognized named-value: 'secrets'),所有平台一起红,
+    # 跟有没有配那个 secret 无关。job 级 env 是允许 secrets 的,从这里中转。
+    env:
+      HAS_UPDATE_SIGN_KEY: ${{ secrets.UPDATE_PRIVKEY_ED25519 != '' }}
     defaults:
       run:
         shell: bash
@@ -1347,6 +1354,28 @@ jobs:
           channel: 'stable'
           cache: true
 
+      # ── 7b. 源头闸门:Flutter 版本串不许带凭据 ─────────────────
+      # 【2026-09-23】token 当初就是从这里进包的:git 的全局 insteadOf 把
+      # PRIVATE_REPO_TOKEN 塞进了 flutter/flutter 的 remote URL,Flutter 把
+      # remote URL 写进版本信息 → 编译进二进制 → 发给每个用户、进每条 Sentry 事件。
+      # 在这里查一次,比事后翻产物(压缩包里根本 grep 不到)有效得多。
+      - name: Guard - Flutter 版本串不许带凭据
+        shell: bash
+        run: |
+          set -uo pipefail
+          ver="$(flutter --version 2>&1 || true)"
+          if printf '%s' "$ver" | grep -qE 'x-access-token|ghp_[A-Za-z0-9]{20,}|ghs_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}'; then
+            echo "::error::Flutter 版本串里带着凭据 —— git 的 insteadOf 改写范围又放宽了。"
+            echo "::error::(不打印内容,那就是凭据本身)"
+            exit 1
+          fi
+          # 顺带确认全局改写只覆盖我们自己的 owner
+          if git config --global --get-regexp 'url\..*\.insteadOf' | grep -q 'github\.com/"'; then
+            echo "::error::检测到无条件的 github.com 改写规则(会污染所有第三方仓库)"
+            exit 1
+          fi
+          echo "[guard] Flutter 版本串干净"
+
       # ── 8. Windows: 安装 flutter_distributor(仅旧 ref 需要)──────
       # 新版 setup.dart 的 windows 分支直接 flutter build,不再用 distributor,
       # 这步对新 tag 是多余的。但**旧 tag**(windows 还走 flutter_distributor
@@ -1937,8 +1966,23 @@ jobs:
         run: |
           set -uo pipefail
           [ -d dist ] || { echo "[guard] 没有 dist/,跳过"; exit 0; }
+          # 【区分"空"和"读不动"】原来两者输出一模一样(fail-open);而把"空"也判失败
+          # 又会在构建本来就失败时再叠一条看不懂的报错(本步是 if: always())。
+          # 先把清单取出来,单独看 find 的退出码和 stderr。
+          list="$(mktemp)"; err="$(mktemp)"
+          if ! find dist -type f > "$list" 2> "$err" || [ -s "$err" ]; then
+            echo "::error::扫描 dist/ 出错,不当作干净放行:"
+            cat "$err"
+            exit 1
+          fi
+          if [ ! -s "$list" ]; then
+            echo "[guard] dist/ 是空的,跳过"
+            exit 0
+          fi
           hits=0
+          scanned=0
           while IFS= read -r f; do
+            scanned=$((scanned+1))
             # -a 把二进制也当文本扫;只报文件名和模式,不打印命中内容(那就是凭据本身)
             # 注意:grep -E 是 ERE,量词写 {20,} 而不是 \{20,\} —— 写成后者会变成
             # 匹配字面大括号,这四条里只有 x-access-token 生效(第一版就踩了,实测过)。
@@ -1949,11 +1993,21 @@ jobs:
               fi
             done
           done < <(find dist -type f)
+          # zip 族(apk/aab/zip)压缩后 grep 扫不到,流式解出来再扫。
+          # dmg(UDZO)/Inno exe(LZMA)仍然扫不动 —— 那条线靠上面的"Flutter 版本串"
+          # 源头闸门兜,这里不假装能扫。
+          while IFS= read -r z; do
+            if unzip -p "$z" 2>/dev/null | LC_ALL=C grep -aqE 'x-access-token|ghp_[A-Za-z0-9]{20,}|ghs_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}'; then
+              echo "::error::压缩产物 $(basename "$z") 内部命中凭据模式"
+              hits=$((hits+1))
+            fi
+          done < <(find dist -type f \( -name '*.apk' -o -name '*.aab' -o -name '*.zip' -o -name '*.ipa' \))
           if [ "$hits" -gt 0 ]; then
             echo "::error::共 $hits 处。构建作废 —— 先修泄漏源(多半是 git insteadOf 改写范围过宽)。"
             exit 1
           fi
-          echo "[guard] 产物干净"
+          # 【别 fail-open】dist 目录不可读 / find 出错时,原来和"扫干净"输出一模一样。
+          echo "[guard] 产物干净(扫了 $scanned 个文件)"
 
       # ── 13b. 更新包签名(Ed25519)────────────────────────────
       # 【2026-09-23】客户端 update_signature.dart 早就会验签,可打包链里**从来
@@ -1965,28 +2019,37 @@ jobs:
       # 配了 → 每个产物生成 <文件名>.sig,并汇总到 dist/UPDATE_SIGNATURES.txt,
       # 机场主把里面的 sig 填进 OSS updateConfig 对应平台的 `sig` 字段即可。
       # 私钥只经环境变量进签名工具(命令行参数会出现在 ps 里)。
-      # if 用 secrets 上下文直接判(step 级 env 能不能在自己的 if 里读到,
-      # 各版本 runner 行为有过出入;secrets 在 step if 里是明确可用的)。
       - name: Sign update packages (Ed25519)
-        if: ${{ secrets.UPDATE_PRIVKEY_ED25519 != '' }}
+        if: env.HAS_UPDATE_SIGN_KEY == 'true'
         env:
           UPDATE_PRIVKEY_ED25519: ${{ secrets.UPDATE_PRIVKEY_ED25519 }}
         shell: bash
         run: |
           set -euo pipefail
-          summary="dist/UPDATE_SIGNATURES.txt"
+          # dist 不一定存在(旧 ref 的 windows 分支不建它;第 13 步的 Debug 就写着
+          # "[dist/ not found]" 兜底)。没有就跳过,别把构建打挂。
+          [ -d dist ] || { echo "[sign] 没有 dist/,跳过"; exit 0; }
+          # 汇总文件按平台命名:release job 用 merge-multiple 把各平台摊平进同一个
+          # dist,同名会互相覆盖,只剩最后一个平台的 sig。
+          suffix="${PLATFORM:-unknown}${ARCH:+-$ARCH}${FLAVOR:+-$FLAVOR}"
+          summary="dist/UPDATE_SIGNATURES-${suffix}.txt"
           : > "$summary"
-          shopt -s nullglob
-          for f in dist/*; do
+          # 递归:linux AppImage 会在 dist 下造子目录,原来 `for f in dist/*` 只看一层,
+          # 子目录里的产物静默漏签(Guard 和 TG 列表都是递归的,三处口径不一致)。
+          while IFS= read -r f; do
             case "$f" in
-              *.sha256|*.sig|"$summary") continue ;;
+              *.sha256|*.sig|dist/UPDATE_SIGNATURES-*.txt) continue ;;
             esac
-            [ -f "$f" ] || continue
-            out="$(dart run tool/sign_update.dart sign "$f")"
+            # set -e 下命令替换失败会**直接终止**,下面的 ::error:: 根本打不出来,
+            # 日志里只剩 dart 的 stderr、看不出是哪个文件。显式接住。
+            out="$(dart run tool/sign_update.dart sign "$f")" || {
+              echo "::error::签名失败: $f"
+              exit 1
+            }
             sha="$(printf '%s\n' "$out" | awk '/^SHA256/{print $NF}')"
             sig="$(printf '%s\n' "$out" | awk '/^SIG/{print $NF}')"
             if [ -z "$sig" ]; then
-              echo "::error::签名失败: $f"
+              echo "::error::签名输出里没有 SIG: $f"
               exit 1
             fi
             printf '%s\n' "$sig" > "$f.sig"
@@ -1996,7 +2059,7 @@ jobs:
               echo "sig:    $sig"
               echo
             } >> "$summary"
-          done
+          done < <(find dist -type f)
           echo "== 已签名 =="
           cat "$summary"
 
@@ -2155,7 +2218,7 @@ jobs:
                   f for f in dist.rglob("*")
                   if f.is_file()
                   and not f.name.endswith((".sha256", ".sig"))
-                  and f.name != "UPDATE_SIGNATURES.txt"
+                  and not f.name.startswith("UPDATE_SIGNATURES-")
               ) if dist.exists() else []
 
               file_list = "\n".join(f"• `{f.name}`" for f in all_files) if all_files else "（无文件）"
@@ -2516,7 +2579,7 @@ jobs:
         run: |
           cd ./dist
           # .sig / 签名汇总不参与校验和(否则会生成 xxx.sig.sha256 这种噪音)
-          for file in $(find . -type f -not -name "*.sha256" -not -name "*.sig" -not -name "UPDATE_SIGNATURES.txt"); do
+          for file in $(find . -type f -not -name "*.sha256" -not -name "*.sig" -not -name "UPDATE_SIGNATURES-*.txt"); do
             sha256sum "$file" > "${file}.sha256"
           done
 
