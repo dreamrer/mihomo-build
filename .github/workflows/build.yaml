@@ -262,11 +262,27 @@ jobs:
 
     steps:
       # ── 0. 配置 git 凭据 ────────────────────────────────────
+      # 【只改写自己那个 owner 的地址 · 2026-09-23】
+      # 原来是无条件 insteadOf "https://github.com/" —— runner 上**所有** github 地址
+      # 都被塞进 PRIVATE_REPO_TOKEN,包括 flutter-action 拉的 flutter/flutter。
+      # Flutter 会把 remote URL 写进版本串 → 编译进二进制 → 出现在每个用户的安装包
+      # 和每条 Sentry 事件里(实证:3.5.1/4.8.0 三个构建的事件里都带着 ghp_)。
+      # 现在只改写 <owner>/ 前缀,flutter 等第三方仓库的 URL 保持干净。
+      # secret 走 env 不内联进 run,免得出现在命令行里。
       - name: Configure git credentials
+        env:
+          GH_TOKEN_FOR_PRIVATE: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          SRC_REPO: ${{ inputs.source_repo || secrets.PRIVATE_REPO_NAME }}
         run: |
+          set -eu
+          owner="${SRC_REPO%%/*}"
+          if [ -z "$owner" ]; then
+            echo "::error::拿不到私有源码仓的 owner(source_repo/PRIVATE_REPO_NAME 都为空)"
+            exit 1
+          fi
           git config --global credential.helper ""
-          git config --global url."https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "git@github.com:"
-          git config --global url."https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${GH_TOKEN_FOR_PRIVATE}@github.com/${owner}/".insteadOf "git@github.com:${owner}/"
+          git config --global url."https://x-access-token:${GH_TOKEN_FOR_PRIVATE}@github.com/${owner}/".insteadOf "https://github.com/${owner}/"
 
       # ── 0b. ubuntu-latest 磁盘清理: TV/linux build 把 14GB 装满会爆 ──────
       # ubuntu-latest 预装的 .NET / Haskell / CodeQL / boost / Swift 等加起来 ~17GB,
@@ -1910,6 +1926,35 @@ jobs:
           echo "=== dist/ contents ==="
           ls -la dist/ 2>/dev/null || echo "[dist/ not found]"
 
+      # ── 13a. 产物凭据泄漏闸门 ─────────────────────────────
+      # 【2026-09-23】曾经 git 的全局 insteadOf 把 PRIVATE_REPO_TOKEN 塞进 flutter 的
+      # remote URL,Flutter 把它写进版本串 → 编译进二进制 → 随安装包发给所有用户,
+      # 并出现在每条 Sentry 事件里。改写已收窄到自己的 owner,但这类泄漏靠"记得别写错"
+      # 是防不住的,这里当场扫产物:命中就让构建失败,绝不把带凭据的包发出去。
+      - name: Guard - 产物里不许有凭据
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          [ -d dist ] || { echo "[guard] 没有 dist/,跳过"; exit 0; }
+          hits=0
+          while IFS= read -r f; do
+            # -a 把二进制也当文本扫;只报文件名和模式,不打印命中内容(那就是凭据本身)
+            # 注意:grep -E 是 ERE,量词写 {20,} 而不是 \{20,\} —— 写成后者会变成
+            # 匹配字面大括号,这四条里只有 x-access-token 生效(第一版就踩了,实测过)。
+            for pat in 'x-access-token' 'ghp_[A-Za-z0-9]{20,}' 'ghs_[A-Za-z0-9]{20,}' 'github_pat_[A-Za-z0-9_]{20,}'; do
+              if LC_ALL=C grep -aqE "$pat" "$f" 2>/dev/null; then
+                echo "::error::产物 $(basename "$f") 命中凭据模式 [$pat]"
+                hits=$((hits+1))
+              fi
+            done
+          done < <(find dist -type f)
+          if [ "$hits" -gt 0 ]; then
+            echo "::error::共 $hits 处。构建作废 —— 先修泄漏源(多半是 git insteadOf 改写范围过宽)。"
+            exit 1
+          fi
+          echo "[guard] 产物干净"
+
       # ── 13b. 更新包签名(Ed25519)────────────────────────────
       # 【2026-09-23】客户端 update_signature.dart 早就会验签,可打包链里**从来
       # 没有过签名步骤**(上面那句"私钥只在下方签名步骤用"是空头支票):OSS 配置里
@@ -2133,11 +2178,27 @@ jobs:
       contains(inputs.platforms, 'openwrt')
 
     steps:
+      # 【只改写自己那个 owner 的地址 · 2026-09-23】
+      # 原来是无条件 insteadOf "https://github.com/" —— runner 上**所有** github 地址
+      # 都被塞进 PRIVATE_REPO_TOKEN,包括 flutter-action 拉的 flutter/flutter。
+      # Flutter 会把 remote URL 写进版本串 → 编译进二进制 → 出现在每个用户的安装包
+      # 和每条 Sentry 事件里(实证:3.5.1/4.8.0 三个构建的事件里都带着 ghp_)。
+      # 现在只改写 <owner>/ 前缀,flutter 等第三方仓库的 URL 保持干净。
+      # secret 走 env 不内联进 run,免得出现在命令行里。
       - name: Configure git credentials
+        env:
+          GH_TOKEN_FOR_PRIVATE: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          SRC_REPO: ${{ inputs.source_repo || secrets.PRIVATE_REPO_NAME }}
         run: |
+          set -eu
+          owner="${SRC_REPO%%/*}"
+          if [ -z "$owner" ]; then
+            echo "::error::拿不到私有源码仓的 owner(source_repo/PRIVATE_REPO_NAME 都为空)"
+            exit 1
+          fi
           git config --global credential.helper ""
-          git config --global url."https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "git@github.com:"
-          git config --global url."https://x-access-token:${{ secrets.PRIVATE_REPO_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${GH_TOKEN_FOR_PRIVATE}@github.com/${owner}/".insteadOf "git@github.com:${owner}/"
+          git config --global url."https://x-access-token:${GH_TOKEN_FOR_PRIVATE}@github.com/${owner}/".insteadOf "https://github.com/${owner}/"
 
       - name: Checkout private source
         uses: actions/checkout@v4
