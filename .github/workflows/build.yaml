@@ -1893,6 +1893,9 @@ jobs:
         # app_name 是机场主在 TG 里随手输入的显示名,bot 侧原本零校验。
         env:
           APP_NAME_RAW: ${{ inputs.app_name }}
+          # 服务名要按品牌派生(见下面 HELPER_SVC),这个步骤自己的 env 里得有它 ——
+          # 上面别的步骤设的 env 不会带过来。
+          APP_NAME_EN_RAW: ${{ inputs.app_name_en }}
           APP_VERSION_RAW: ${{ inputs.app_version }}
         run: |
           APP_NAME="$APP_NAME_RAW"
@@ -1917,11 +1920,22 @@ jobs:
             PKG_NAME="com.apex.vpn"
           fi
 
+          # Windows 服务名:按品牌派生,和客户端 constant.dart 的 appHelperService
+          # 同一套规则(APP_NAME_EN 转小写、只留 a-z0-9,空则回落 apex)+ "HelperService"。
+          # 【2026-09-23 审计 MED】原来所有品牌共用 ApexHelperService,卸载一个品牌会
+          # `sc delete` 掉另一个品牌的 helper 服务。两边必须算出同一个值。
+          SVC_SLUG=$(printf '%s' "${APP_NAME_EN_RAW:-Apex}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
+          case "$SVC_SLUG" in
+            [a-z]*) : ;;
+            *) SVC_SLUG="apex" ;;
+          esac
+          HELPER_SVC="${SVC_SLUG}HelperService"
+
           # 从 app_name SHA256 前 32 位生成稳定 GUID（同名每次固定）
           HASH=$(echo -n "$APP_NAME" | sha256sum | cut -c1-32 | tr '[:lower:]' '[:upper:]')
           APP_UUID="${HASH:0:8}-${HASH:8:4}-${HASH:12:4}-${HASH:16:4}-${HASH:20:12}"
 
-          echo "Inno: AppName=$APP_NAME  BinaryExe=$BINARY_EXE  Package=$PKG_NAME  AppVersion=$APP_VERSION  AppId=$APP_UUID"
+          echo "Inno: AppName=$APP_NAME  BinaryExe=$BINARY_EXE  Package=$PKG_NAME  Service=$HELPER_SVC  AppVersion=$APP_VERSION  AppId=$APP_UUID"
 
           if [ -f "update_installer.iss" ]; then
             mkdir -p dist
@@ -1931,6 +1945,7 @@ jobs:
               "/DMyAppName=$APP_NAME" \
               "/DMyBinaryName=$BINARY_EXE" \
               "/DMyPackageName=$PKG_NAME" \
+              "/DMyHelperService=$HELPER_SVC" \
               "/DMyAppVersion=$APP_VERSION" \
               "/DMyAppId=$APP_UUID" \
               update_installer.iss
