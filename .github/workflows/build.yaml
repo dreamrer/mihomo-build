@@ -998,7 +998,7 @@ jobs:
                   # ── Android 12+ 系统启动屏底色 ──────────────
                   # 系统启动屏**只能是纯色**(SplashScreen API 不收渐变/文字),所以"好看"
                   # 唯一能调的就是这个颜色。填了品牌色就用品牌色(满屏品牌色 + 中间 logo),
-                  # 没填保持 #080B14 —— 和 Flutter 启动页第一站同色,零跳变。
+                  # 没填保持仓库默认 #29C9F2(Apex 主色)—— 和 Flutter 启动页第一站同色,零跳变。
                   # 客户端那边 _splashGradient 会拿同一个 APEX_BRAND_COLOR 当渐变第一站,
                   # 所以"系统屏 → 品牌启动页"是连着的,不会闪一下颜色。
                   _brand = (os.environ.get('BRAND_COLOR') or '').strip().lstrip('#')
