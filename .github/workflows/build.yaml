@@ -349,6 +349,7 @@ jobs:
           WANT_ALLOW_INSECURE_TLS: ${{ fromJSON(inputs.mw || '{}').allow_insecure_tls }}
           WANT_UI:                 ${{ fromJSON(inputs.mw || '{}').ui }}
           WANT_BRAND_COLOR:        ${{ fromJSON(inputs.mw || '{}').brand_color }}
+          WANT_HAS_IPV6_NODES:     ${{ fromJSON(inputs.mw || '{}').has_ipv6_nodes }}
         run: |
           set -euo pipefail
           REQUIRED="XOR_KEY APEX_FLAG ENABLE_ENCRYPTION OSS_URL_1 OSS_URL_2 \
@@ -394,6 +395,7 @@ jobs:
           }
           check_optional APEX_ALLOWED_DOMAINS "$WANT_ALLOWED_DOMAINS"
           check_optional ALLOW_INSECURE_TLS   "$WANT_ALLOW_INSECURE_TLS"
+          check_optional HAS_IPV6_NODES       "$WANT_HAS_IPV6_NODES"
 
           # ── 界面风格(APEX_UI,2026-09-22)──
           # 经典款(classic)是默认,选它等于没选,旧版本照常过。选了别的:
@@ -1713,6 +1715,12 @@ jobs:
           APEX_UI:              ${{ fromJSON(inputs.mw || '{}').ui }}
           # 品牌主色 RRGGBB,同样走 mw 口袋。空 = Apex 默认色。
           APEX_BRAND_COLOR:     ${{ fromJSON(inputs.mw || '{}').brand_color }}
+          # 【IPv6 节点 · 2026-09-24】机场的节点有 IPv6 可达性(节点本身是 IPv6 地址,
+          # 或域名配了 AAAA)时传 "true"。它决定客户端 ipv6 开关的**默认值**。
+          # 不传的后果不是"少个优化",是那批 IPv6 节点**对所有用户都连不上**:
+          # mihomo 关着 ipv6 时 IPv6 字面量直接判 ErrIPVersion,域名也只查 A 记录。
+          # 开着不危险 —— 客户端生效值还要 AND 上本机 Ipv6Probe,没 IPv6 的网络自动降级。
+          HAS_IPV6_NODES:       ${{ fromJSON(inputs.mw || '{}').has_ipv6_nodes }}
           ANDROID_FLAVOR: ${{ matrix.flavor || '' }}
           # ↓ setup.dart::Build.mihomoTag 读这个，触发 mihomo 源码 patch + ldflags 注入
           MIHOMO_TAG: ${{ env.MIHOMO_TAG }}
