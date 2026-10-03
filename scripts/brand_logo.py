@@ -260,6 +260,42 @@ def android_background_hex(sq):
     return '#%02X%02X%02X' % edge_color(sq)
 
 
+def tile_icon(sq, px=96):
+    """快捷开关 / 状态栏这类"单色图标":系统只认形状(透明度),颜色由系统统一上。
+    从方图里把"不是底色的部分"取出来做成白色剪影,裁到图形本身再留一点边。
+
+    做不出像样剪影时返回 None(调用方保留默认图标):满幅照片 / 渐变(没有底色可言)、
+    图形几乎铺满(剪影就是一个实心方块)、图形太小。"""
+    sq = sq.convert('RGBA')
+    kind = _corner_kind(sq)
+    if not isinstance(kind, tuple):
+        return None
+    rgb = sq.convert('RGB')
+    r, g, b = ImageChops.difference(rgb, Image.new('RGB', sq.size, kind)).split()
+    dist = ImageChops.lighter(ImageChops.lighter(r, g), b)
+    # 和底色差 24 以内算底,90 以上算图形,中间过渡(保住抗锯齿边)
+    alpha = dist.point(lambda v: 0 if v <= 24 else (255 if v >= 90 else int((v - 24) * 255 / 66)))
+    solid = alpha.point(lambda v: 255 if v > 128 else 0)
+    bb = solid.getbbox()
+    if not bb:
+        return None
+    bw, bh = bb[2] - bb[0], bb[3] - bb[1]
+    if max(bw, bh) < 0.15 * sq.size[0]:
+        return None
+    fill = sum(solid.crop(bb).histogram()[128:]) / float(bw * bh)
+    if fill > 0.92 and max(bw, bh) > 0.8 * sq.size[0]:
+        return None
+    shape = alpha.crop(bb)
+    inner = int(px * 0.88)
+    scale = inner / float(max(bw, bh))
+    shape = shape.resize((max(1, int(bw * scale)), max(1, int(bh * scale))), Image.LANCZOS)
+    mask = Image.new('L', (px, px), 0)
+    mask.paste(shape, ((px - shape.size[0]) // 2, (px - shape.size[1]) // 2))
+    out = Image.new('RGBA', (px, px), (255, 255, 255, 0))
+    out.putalpha(mask)
+    return out
+
+
 def macos_icon(sq, px):
     """苹果模板:1024 画布里 824 的圆角方块(圆角 185),四周透明。"""
     s = SIDE

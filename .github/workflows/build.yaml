@@ -776,6 +776,17 @@ jobs:
                           ri.save(base / 'ic_launcher.webp', format='WEBP')
                           print(f'[inject] Android icon (新建): {base}/ic_launcher.webp')
 
+                  _tile = _bl.tile_icon(sq)
+                  _tile_xml = Path('android/app/src/main/res/drawable/ic_tile.xml')
+                  if _tile is not None and _tile_xml.exists():
+                      _tile_dir = Path('android/app/src/main/res/drawable-nodpi')
+                      _tile_dir.mkdir(parents=True, exist_ok=True)
+                      _tile.save(_tile_dir / 'ic_tile.png', format='PNG')
+                      _tile_xml.unlink()
+                      print('[inject] 快捷开关图标: 用 logo 剪影')
+                  else:
+                      print('[inject] 快捷开关图标: 保留默认')
+
                   ps = Path('android/app/src/main/ic_launcher-playstore.png')
                   if ps.exists():
                       sq.resize((512, 512), Image.LANCZOS).convert('RGB').save(ps)

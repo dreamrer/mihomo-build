@@ -182,6 +182,25 @@ class AuditCasesTest(unittest.TestCase):
         self.assertEqual(w.getpixel((0, 0))[3], 0)
         self.assertEqual(w.getpixel((128, 128))[3], 255)
 
+    def test_tile_icon_silhouette(self):
+        im = Image.new('RGBA', (1024, 1024), (255, 255, 255, 255))
+        ImageDraw.Draw(im).ellipse((312, 312, 712, 712), fill=(0, 170, 80, 255))
+        sq, _ = b.normalize(im)
+        t = b.tile_icon(sq, 96)
+        self.assertEqual(t.size, (96, 96))
+        self.assertEqual(t.getpixel((48, 48)), (255, 255, 255, 255))   # 图形 = 白色不透明
+        self.assertEqual(t.getpixel((1, 1))[3], 0)                     # 底 = 透明
+        self.assertGreater(t.getpixel((48, 8))[3], 200)                # 裁到图形本身,接近铺满
+
+    def test_tile_icon_none_when_no_shape(self):
+        sq, _ = b.normalize(_gradient_tile())                          # 整块色块:剪影只会是实心方块
+        self.assertIsNone(b.tile_icon(sq))
+        photo = Image.new('RGBA', (64, 64))
+        for y in range(64):
+            for x in range(64):
+                photo.putpixel((x, y), (x * 4, y * 4, 200, 255))       # 四角不同色的满幅图
+        self.assertIsNone(b.tile_icon(b.normalize(photo)[0]))
+
 
 if __name__ == '__main__':
     unittest.main()
