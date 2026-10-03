@@ -1,0 +1,19 @@
+{
+    "name": "登录设备识别",
+    "code": "apex_devices",
+    "version": "1.1.0",
+    "description": "让 Apex 客户端「登录设备管理」显示每个会话的设备型号、系统和登录 IP,并认出本机。原理:用户登录建令牌时,把请求的 User-Agent 和 IP 写进令牌的 name 字段(Xboard 原本在这里存一个没用的随机串)。不改核心文件、不加表、不影响网页端和其它客户端。只对启用后新登录的会话生效;启用前已登录的会话在它下一次访问面板时自动补上。",
+    "author": "Apex",
+    "type": "feature",
+    "require": {
+        "xboard": ">=1.0.0"
+    },
+    "config": {
+        "record_ip": {
+            "type": "boolean",
+            "default": true,
+            "label": "记录登录 IP",
+            "description": "开启后设备列表会显示登录 IP(客户端展示时只露前两段)。关掉则只记设备型号。"
+        }
+    }
+}
