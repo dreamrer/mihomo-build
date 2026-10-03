@@ -1875,7 +1875,7 @@ jobs:
           [ -z "$PKG_NAME" ] && PKG_NAME="mihomo"
           echo "APP_NAME=$APP_NAME  PKG_NAME=$PKG_NAME"
           LDFLAGS="-w -s -X 'github.com/metacubex/mihomo/constant.Version=$VER' -X 'github.com/metacubex/mihomo/constant.BuildTime=$BUILD_TIME'"
-          MIHOMO_VERSION="v1.19.29"
+          MIHOMO_VERSION="v1.19.32"
           CORE_DIR="/tmp/mihomo-src"
           case "${APEX_CORE:-official}" in
             ""|official)
@@ -1948,7 +1948,7 @@ jobs:
             echo "=== Building $arch (ipk: $ipk_archs) ==="
 
             GOOS=linux GOARCH="$goarch" GOARM="$goarm" GOMIPS="$gomips" CGO_ENABLED=0 \
-              go build -C "$CORE_DIR" -tags="with_gvisor" -trimpath -ldflags="$LDFLAGS" -o "/tmp/mihomo-$arch"
+              go build -C "$CORE_DIR" -tags="with_gvisor,no_easytier,no_zerotier" -trimpath -ldflags="$LDFLAGS" -o "/tmp/mihomo-$arch"
 
             local pkg="/tmp/pkg-$arch"
             mkdir -p "$pkg/usr/bin" "$pkg/etc/init.d" "$pkg/etc/config" "$pkg/etc/mihomo" "$pkg/etc/mihomo/ui" "$pkg/etc/uci-defaults"
