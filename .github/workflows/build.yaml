@@ -1367,10 +1367,15 @@ jobs:
           VERSION=$(plutil -extract CFBundleShortVersionString raw -o - "$APP_DIR/Contents/Info.plist" 2>/dev/null || echo "1.0")
 
           mkdir -p dist
-          DMG_OUTPUT="dist/${APP_NAME_NOAPP}-${VERSION}-macos-universal.dmg"
-
           rm -f dist/*.dmg dist/*.pkg dist/*.zip
 
+          # 一个 .app 出一个 dmg:安装教程 + appdmg 布局 + ULMO 压缩。
+          #   make_dmg <app_dir> <输出路径>
+          make_dmg() {
+          local APP_DIR="$1" DMG_OUTPUT="$2"
+          local APP_NAME_BUNDLE APP_NAME_NOAPP STAGING VOLNAME SPEC DMG_OK
+          APP_NAME_BUNDLE=$(basename "$APP_DIR")
+          APP_NAME_NOAPP="${APP_NAME_BUNDLE%.app}"
           STAGING=$(mktemp -d)
           cp -R "$APP_DIR" "$STAGING/"
           ln -s /Applications "$STAGING/Applications"
@@ -1472,6 +1477,50 @@ jobs:
             echo "::warning::DMG 转 ULMO 失败,保留 UDZO 原包"
             rm -f "$DMG_OUTPUT.ulmo.dmg"
           fi
+
+          }
+
+          # 【2026-10-06 用户定】macOS 出三个包:通用版 + 按芯片各一个。
+          # 单芯片版从通用版 .app 复制一份,把每个双架构 Mach-O(内核 / helper / Flutter 引擎 /
+          # Dart 代码 / 插件 framework)用 lipo -thin 抽成单切片,体积约为通用版一半(本机实测
+          # 205MB → 115MB,dmg 67MB → 35MB);抽完签名作废,按同一套 entitlements 重新 ad-hoc 签。
+          # 不用 ditto --arch:本机 macOS 26 上它对已签名的 .app 不生效,抽出来还是双架构。
+          # helper 的 TOKEN 是装机时按实际内核算 SHA,薄内核不受影响。
+          #   thin_app <app_dir> <arch>:返回变薄的文件数,一个都没变薄说明本来就不是通用版
+          thin_app() {
+            local app="$1" arch="$2" n=0 f archs
+            while IFS= read -r -d '' f; do
+              archs=$(lipo -archs "$f" 2>/dev/null) || continue
+              case " $archs " in *" $arch "*) ;; *) continue ;; esac
+              [ "$archs" = "$arch" ] && continue
+              if lipo -thin "$arch" "$f" -output "$f.thin"; then
+                mv -f "$f.thin" "$f"; n=$((n + 1))
+              else
+                echo "::warning::lipo -thin $arch 失败: $f" >&2; rm -f "$f.thin"
+              fi
+            done < <(find "$app" -type f -print0)
+            echo "$n"
+          }
+          make_dmg "$APP_DIR" "dist/${APP_NAME_NOAPP}-${VERSION}-macos-universal.dmg"
+          for ARCH in arm64 x86_64; do
+            THIN_ROOT=$(mktemp -d)
+            THIN_APP="$THIN_ROOT/$APP_NAME_BUNDLE"
+            cp -R "$APP_DIR" "$THIN_APP"
+            THINNED=$(thin_app "$THIN_APP" "$ARCH")
+            if [ "${THINNED:-0}" -lt 1 ]; then
+              echo "::warning::$ARCH:一个文件都没变薄(构建产物不是通用版?),跳过单芯片包"
+              rm -rf "$THIN_ROOT"; continue
+            fi
+            echo "[thin] $ARCH: 变薄 $THINNED 个文件,$(du -sh "$THIN_APP" | cut -f1)"
+            echo "[thin] $ARCH: $(lipo -info "$THIN_APP/Contents/MacOS/ApexCore" 2>/dev/null | sed 's/.*: //')"
+            find "$THIN_APP" -name "*.framework" -o -name "*.dylib" | while read fw; do
+              codesign --force --deep --sign - "$fw" 2>/dev/null || true
+            done
+            codesign --force --deep --sign - --entitlements "$SIGN_ENT" "$THIN_APP"
+            codesign -v "$THIN_APP" && echo "[thin] ✓ $ARCH 签名有效" || echo "::warning::$ARCH 签名校验告警"
+            make_dmg "$THIN_APP" "dist/${APP_NAME_NOAPP}-${VERSION}-macos-${ARCH}.dmg"
+            rm -rf "$THIN_ROOT"
+          done
 
           ls -la dist/
 
@@ -1706,7 +1755,7 @@ jobs:
               "android-mobile": "📱 Android 手机版",
               "android-tv":     "📺 Android TV版",
               "windows-amd64":    "🖥️ Windows (x64)",
-              "macos-universal":  "🍏 macOS (Universal)",
+              "macos-universal":  "🍏 macOS (Universal + arm64 + x86_64)",
               "linux-amd64":      "🐧 Linux (x64)",
               "ios-arm64":        "🍎 iOS",
           }
