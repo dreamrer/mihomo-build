@@ -253,6 +253,7 @@ jobs:
           WANT_SMART_LGBM:         ${{ fromJSON(inputs.mw || '{}').smart_lgbm }}
           WANT_SMART_PRIORITY_B64: ${{ fromJSON(inputs.mw || '{}').smart_priority_b64 }}
           WANT_SMART_ASN:          ${{ fromJSON(inputs.mw || '{}').smart_asn }}
+          WANT_WIN_CTL_PIPE:       ${{ vars.APEX_WIN_CTL_PIPE }}
         run: |
           set -euo pipefail
           REQUIRED="XOR_KEY APEX_FLAG ENABLE_ENCRYPTION OSS_URL_1 OSS_URL_2 \
@@ -289,6 +290,7 @@ jobs:
           check_optional APEX_ALLOWED_DOMAINS "$WANT_ALLOWED_DOMAINS"
           check_optional ALLOW_INSECURE_TLS   "$WANT_ALLOW_INSECURE_TLS"
           check_optional HAS_IPV6_NODES       "$WANT_HAS_IPV6_NODES"
+          check_optional APEX_WIN_CTL_PIPE    "$WANT_WIN_CTL_PIPE"
 
           case "$WANT_CORE" in
             ""|official) ;;
@@ -1281,6 +1283,8 @@ jobs:
           APEX_LOGIN_TITLE_B64:    ${{ fromJSON(inputs.mw || '{}').login_title_b64 }}
           APEX_LOGIN_SUBTITLE_B64: ${{ fromJSON(inputs.mw || '{}').login_subtitle_b64 }}
           HAS_IPV6_NODES:       ${{ fromJSON(inputs.mw || '{}').has_ipv6_nodes }}
+          # 保险开关:仓库变量(Settings → Variables)。留空 = 默认(开);填 false = 关掉 Windows 的命名管道退路。
+          APEX_WIN_CTL_PIPE:    ${{ vars.APEX_WIN_CTL_PIPE }}
           ANDROID_FLAVOR: ${{ matrix.flavor || '' }}
           MIHOMO_TAG: ${{ env.MIHOMO_TAG }}
         run: |
