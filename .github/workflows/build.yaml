@@ -1276,6 +1276,9 @@ jobs:
           ALLOW_INSECURE_TLS:   ${{ fromJSON(inputs.mw || '{}').allow_insecure_tls }}
           APEX_UI:              ${{ fromJSON(inputs.mw || '{}').ui }}
           APEX_CORE:            ${{ fromJSON(inputs.mw || '{}').core }}
+          # core=apex(自研内核,目前只有桌面端)时从这里取源码:地址放密钥里(可带令牌),版本放变量里。
+          APEX_KERNEL_REPO:     ${{ secrets.APEX_KERNEL_REPO }}
+          APEX_KERNEL_REF:      ${{ vars.APEX_KERNEL_REF }}
           APEX_SMART_LGBM:      ${{ fromJSON(inputs.mw || '{}').smart_lgbm }}
           APEX_SMART_PRIORITY_B64: ${{ fromJSON(inputs.mw || '{}').smart_priority_b64 }}
           APEX_SMART_ASN:       ${{ fromJSON(inputs.mw || '{}').smart_asn }}
