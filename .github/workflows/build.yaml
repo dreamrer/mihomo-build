@@ -254,6 +254,7 @@ jobs:
           WANT_SMART_PRIORITY_B64: ${{ fromJSON(inputs.mw || '{}').smart_priority_b64 }}
           WANT_SMART_ASN:          ${{ fromJSON(inputs.mw || '{}').smart_asn }}
           WANT_WIN_CTL_PIPE:       ${{ vars.APEX_WIN_CTL_PIPE }}
+          WANT_HELPER_CONFINE:     ${{ vars.APEX_HELPER_CONFINE }}
         run: |
           set -euo pipefail
           REQUIRED="XOR_KEY APEX_FLAG ENABLE_ENCRYPTION OSS_URL_1 OSS_URL_2 \
@@ -291,6 +292,7 @@ jobs:
           check_optional ALLOW_INSECURE_TLS   "$WANT_ALLOW_INSECURE_TLS"
           check_optional HAS_IPV6_NODES       "$WANT_HAS_IPV6_NODES"
           check_optional APEX_WIN_CTL_PIPE    "$WANT_WIN_CTL_PIPE"
+          check_optional APEX_HELPER_CONFINE  "$WANT_HELPER_CONFINE"
 
           case "$WANT_CORE" in
             ""|official) ;;
@@ -1285,6 +1287,9 @@ jobs:
           HAS_IPV6_NODES:       ${{ fromJSON(inputs.mw || '{}').has_ipv6_nodes }}
           # 保险开关:仓库变量(Settings → Variables)。留空 = 默认(开);填 false = 关掉 Windows 的命名管道退路。
           APEX_WIN_CTL_PIPE:    ${{ vars.APEX_WIN_CTL_PIPE }}
+          # 试验开关:仓库变量。留空 = 默认(关);填 true = macOS / Linux 上经 TUN 组件起的内核改在 root 自己的目录里跑。
+          # 真机验过之前不要打开。
+          APEX_HELPER_CONFINE:  ${{ vars.APEX_HELPER_CONFINE }}
           ANDROID_FLAVOR: ${{ matrix.flavor || '' }}
           MIHOMO_TAG: ${{ env.MIHOMO_TAG }}
         run: |
