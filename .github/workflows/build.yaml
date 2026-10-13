@@ -250,6 +250,7 @@ jobs:
           WANT_LOGIN_SUBTITLE_B64: ${{ fromJSON(inputs.mw || '{}').login_subtitle_b64 }}
           WANT_HAS_IPV6_NODES:     ${{ fromJSON(inputs.mw || '{}').has_ipv6_nodes }}
           WANT_CORE:               ${{ fromJSON(inputs.mw || '{}').core }}
+          HAVE_KERNEL_REPO:        ${{ secrets.APEX_KERNEL_REPO != '' }}
           WANT_SMART_LGBM:         ${{ fromJSON(inputs.mw || '{}').smart_lgbm }}
           WANT_SMART_PRIORITY_B64: ${{ fromJSON(inputs.mw || '{}').smart_priority_b64 }}
           WANT_SMART_ASN:          ${{ fromJSON(inputs.mw || '{}').smart_asn }}
@@ -309,8 +310,22 @@ jobs:
               fi
               echo "✅ 内核: Smart(vernesong/mihomo)"
               ;;
+            apex)
+              # 自研内核:源码在私有仓库,地址放在密钥 APEX_KERNEL_REPO(版本放变量 APEX_KERNEL_REF,
+              # 建议填标签或完整提交号 —— 填分支的话同一次打包的各平台可能取到不同的提交)。
+              check_optional APEX_CORE "$WANT_CORE"
+              if [ ! -f scripts/fetch_mihomo_source.sh ] || ! grep -q 'apex_neutralize' scripts/fetch_mihomo_source.sh; then
+                echo "::error::源码仓 \"$SRC_REPO\" 的这个版本还不支持自研内核"
+                exit 1
+              fi
+              if [ "$HAVE_KERNEL_REPO" != "true" ]; then
+                echo "::error::选了自研内核,但仓库没配密钥 APEX_KERNEL_REPO"
+                exit 1
+              fi
+              echo "✅ 内核: 自研"
+              ;;
             *)
-              echo "::error::不认识的内核 \"$WANT_CORE\"(只支持 official / smart)"
+              echo "::error::不认识的内核 \"$WANT_CORE\"(只支持 official / smart / apex)"
               exit 1
               ;;
           esac
@@ -1965,6 +1980,11 @@ jobs:
                 exit 1
               fi
               echo "=== 内核: $CORE_VER ==="
+              ;;
+            apex)
+              # 路由器插件这条构建线还没接自研内核。明确失败,不悄悄换成官方内核。
+              echo "::error::自研内核暂不支持 OpenWrt 插件,请在打包时去掉这个平台"
+              exit 1
               ;;
             *)
               echo "::error::不认识的内核 \"$APEX_CORE\"(只支持 official / smart)"
