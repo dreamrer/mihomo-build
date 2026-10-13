@@ -1948,6 +1948,8 @@ jobs:
           APP_NAME_RAW:      ${{ inputs.app_name || 'mihomo' }}
           VER_RAW:           ${{ steps.version.outputs.version }}
           APEX_CORE:         ${{ fromJSON(inputs.mw || '{}').core }}
+          APEX_KERNEL_REPO:  ${{ secrets.APEX_KERNEL_REPO }}
+          APEX_KERNEL_REF:   ${{ vars.APEX_KERNEL_REF }}
         run: |
           set -e
           VER="$VER_RAW"
@@ -1982,9 +1984,15 @@ jobs:
               echo "=== 内核: $CORE_VER ==="
               ;;
             apex)
-              # 路由器插件这条构建线还没接自研内核。明确失败,不悄悄换成官方内核。
-              echo "::error::自研内核暂不支持 OpenWrt 插件,请在打包时去掉这个平台"
-              exit 1
+              # 自研内核:每个架构由 scripts/build-mihomo.sh 自己取源码、改名、编译(见下面 build_arch)。
+              if [ -z "$APEX_KERNEL_REPO" ]; then
+                echo "::error::选了自研内核,但仓库没配密钥 APEX_KERNEL_REPO"
+                exit 1
+              fi
+              if ! grep -q '"apex" ]]; then' scripts/build-mihomo.sh 2>/dev/null; then
+                echo "::error::这个源码版本的 scripts/build-mihomo.sh 不会编自研内核"
+                exit 1
+              fi
               ;;
             *)
               echo "::error::不认识的内核 \"$APEX_CORE\"(只支持 official / smart)"
@@ -2034,8 +2042,13 @@ jobs:
             local ipk_archs; ipk_archs="$(ipk_arch_names "$arch")"
             echo "=== Building $arch (ipk: $ipk_archs) ==="
 
-            GOOS=linux GOARCH="$goarch" GOARM="$goarm" GOMIPS="$gomips" CGO_ENABLED=0 \
-              go build -C "$CORE_DIR" -tags="with_gvisor,no_easytier,no_zerotier" -trimpath -ldflags="$LDFLAGS" -o "/tmp/mihomo-$arch"
+            if [ "${APEX_CORE:-official}" = "apex" ]; then
+              GOARM="$goarm" GOMIPS="$gomips" APEX_CORE=apex \
+                bash scripts/build-mihomo.sh "$MIHOMO_VERSION" "/tmp/mihomo-$arch" linux "$goarch"
+            else
+              GOOS=linux GOARCH="$goarch" GOARM="$goarm" GOMIPS="$gomips" CGO_ENABLED=0 \
+                go build -C "$CORE_DIR" -tags="with_gvisor,no_easytier,no_zerotier" -trimpath -ldflags="$LDFLAGS" -o "/tmp/mihomo-$arch"
+            fi
 
             local pkg="/tmp/pkg-$arch"
             mkdir -p "$pkg/usr/bin" "$pkg/etc/init.d" "$pkg/etc/config" "$pkg/etc/mihomo" "$pkg/etc/mihomo/ui" "$pkg/etc/uci-defaults"
@@ -2065,7 +2078,7 @@ jobs:
               printf 'Section: net\n'
               printf 'Priority: optional\n'
               printf 'Depends: curl, ca-bundle, kmod-nft-tproxy\n'
-              printf 'Description: %s VPN client (mihomo core) for OpenWrt.\n' "$APP_NAME"
+              printf 'Description: %s VPN client for OpenWrt.\n' "$APP_NAME"
             } > "$ctl/control"
             {
               printf '#!/bin/sh\n'
