@@ -246,6 +246,7 @@ jobs:
           WANT_ALLOW_INSECURE_TLS: ${{ fromJSON(inputs.mw || '{}').allow_insecure_tls }}
           WANT_UI:                 ${{ fromJSON(inputs.mw || '{}').ui }}
           WANT_BRAND_COLOR:        ${{ fromJSON(inputs.mw || '{}').brand_color }}
+          WANT_SPLASH_COLOR:       ${{ fromJSON(inputs.mw || '{}').splash_color }}
           WANT_LOGIN_TITLE_B64:    ${{ fromJSON(inputs.mw || '{}').login_title_b64 }}
           WANT_LOGIN_SUBTITLE_B64: ${{ fromJSON(inputs.mw || '{}').login_subtitle_b64 }}
           WANT_HAS_IPV6_NODES:     ${{ fromJSON(inputs.mw || '{}').has_ipv6_nodes }}
@@ -359,6 +360,15 @@ jobs:
             echo "✅ 品牌主色: $WANT_BRAND_COLOR"
           fi
 
+          if [ -n "$WANT_SPLASH_COLOR" ]; then
+            if ! printf '%s' "$WANT_SPLASH_COLOR" | grep -Eq '^#?[0-9A-Fa-f]{6}$'; then
+              echo "::error::启动页背景色格式不对: \"$WANT_SPLASH_COLOR\"(要 6 位十六进制,如 FFFFFF)"
+              exit 1
+            fi
+            check_optional APEX_SPLASH_COLOR "$WANT_SPLASH_COLOR"
+            echo "✅ 启动页背景色: $WANT_SPLASH_COLOR"
+          fi
+
           for kv in "APEX_LOGIN_TITLE_B64=$WANT_LOGIN_TITLE_B64" "APEX_LOGIN_SUBTITLE_B64=$WANT_LOGIN_SUBTITLE_B64"; do
             k="${kv%%=*}"; v="${kv#*=}"
             [ -z "$v" ] && continue
@@ -385,6 +395,7 @@ jobs:
           OSS_URL_4:      ${{ inputs.oss_url_4 }}
           DEFAULT_UA:     ${{ inputs.default_ua }}
           BRAND_COLOR:    ${{ fromJSON(inputs.mw || '{}').brand_color }}
+          SPLASH_COLOR:   ${{ fromJSON(inputs.mw || '{}').splash_color }}
           TARGET_PLATFORM: ${{ matrix.platform }}
         run: |
           python3 -m pip install Pillow pyyaml pypinyin --quiet --break-system-packages 2>/dev/null || \
@@ -762,22 +773,6 @@ jobs:
                   )
                   print(f'[inject] 自适应图标背景色 ic_launcher_bg = {_hex}')
 
-                  _brand = (os.environ.get('BRAND_COLOR') or '').strip().lstrip('#')
-                  if re.fullmatch(r'[0-9A-Fa-f]{6}', _brand or ''):
-                      colors_xml = Path('android/app/src/main/res/values/colors.xml')
-                      if colors_xml.exists():
-                          ctxt = colors_xml.read_text(encoding='utf-8')
-                          new_ctxt, n = re.subn(
-                              r'(<color name="apex_splash_bg">)[^<]*(</color>)',
-                              r'\g<1>#FF' + _brand.upper() + r'\g<2>',
-                              ctxt,
-                          )
-                          if n:
-                              colors_xml.write_text(new_ctxt, encoding='utf-8')
-                              print(f'[inject] 系统启动屏底色 apex_splash_bg = #FF{_brand.upper()}')
-                          else:
-                              print('[inject] ⚠️ colors.xml 里找不到 apex_splash_bg,启动屏底色没改')
-
                   for folder, size in {
                       'mipmap-mdpi': 48, 'mipmap-hdpi': 72,
                       'mipmap-xhdpi': 96, 'mipmap-xxhdpi': 144,
@@ -964,6 +959,27 @@ jobs:
                   traceback.print_exc()
                   sys.exit(1)  # 图标替换失败时中止构建，防止发布默认图标
 
+          # 系统启动屏底色(安卓 12+ 的 windowSplashScreenBackground)。**不放在 logo 那段里**:原来只有设了 logo
+          # 才写,没 logo 的品牌包系统启动屏一直是默认青色,和 App 自己的启动页对不上(2026-10-14)。
+          _brand = (os.environ.get('BRAND_COLOR') or '').strip().lstrip('#')
+          # 单独设了启动页背景色就用它,没设跟品牌主色走(和 App 启动页 lib/main.dart _splashSolid 一致)。
+          _splash = (os.environ.get('SPLASH_COLOR') or '').strip().lstrip('#')
+          if re.fullmatch(r'[0-9A-Fa-f]{6}', _splash or ''):
+              _brand = _splash
+          if re.fullmatch(r'[0-9A-Fa-f]{6}', _brand or ''):
+              colors_xml = Path('android/app/src/main/res/values/colors.xml')
+              if colors_xml.exists():
+                  ctxt = colors_xml.read_text(encoding='utf-8')
+                  new_ctxt, n = re.subn(
+                      r'(<color name="apex_splash_bg">)[^<]*(</color>)',
+                      r'\g<1>#FF' + _brand.upper() + r'\g<2>',
+                      ctxt,
+                  )
+                  if n:
+                      colors_xml.write_text(new_ctxt, encoding='utf-8')
+                      print(f'[inject] 系统启动屏底色 apex_splash_bg = #FF{_brand.upper()}')
+                  else:
+                      print('[inject] ⚠️ colors.xml 里找不到 apex_splash_bg,启动屏底色没改')
           PYEOF
 
       - name: Setup Android signing
@@ -1304,6 +1320,7 @@ jobs:
           APEX_SMART_PRIORITY_B64: ${{ fromJSON(inputs.mw || '{}').smart_priority_b64 }}
           APEX_SMART_ASN:       ${{ fromJSON(inputs.mw || '{}').smart_asn }}
           APEX_BRAND_COLOR:     ${{ fromJSON(inputs.mw || '{}').brand_color }}
+          APEX_SPLASH_COLOR:    ${{ fromJSON(inputs.mw || '{}').splash_color }}
           APEX_LOGIN_TITLE_B64:    ${{ fromJSON(inputs.mw || '{}').login_title_b64 }}
           APEX_LOGIN_SUBTITLE_B64: ${{ fromJSON(inputs.mw || '{}').login_subtitle_b64 }}
           HAS_IPV6_NODES:       ${{ fromJSON(inputs.mw || '{}').has_ipv6_nodes }}
