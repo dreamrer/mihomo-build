@@ -251,6 +251,7 @@ jobs:
           WANT_HAS_IPV6_NODES:     ${{ fromJSON(inputs.mw || '{}').has_ipv6_nodes }}
           WANT_CORE:               ${{ fromJSON(inputs.mw || '{}').core }}
           HAVE_KERNEL_REPO:        ${{ secrets.APEX_KERNEL_REPO != '' }}
+          KERNEL_REF:              ${{ vars.APEX_KERNEL_REF }}
           WANT_SMART_LGBM:         ${{ fromJSON(inputs.mw || '{}').smart_lgbm }}
           WANT_SMART_PRIORITY_B64: ${{ fromJSON(inputs.mw || '{}').smart_priority_b64 }}
           WANT_SMART_ASN:          ${{ fromJSON(inputs.mw || '{}').smart_asn }}
@@ -322,7 +323,12 @@ jobs:
                 echo "::error::选了自研内核,但仓库没配密钥 APEX_KERNEL_REPO"
                 exit 1
               fi
-              echo "✅ 内核: 自研"
+              # 不设版本的话每个平台各自取内核仓库默认分支的最新提交,同一次打包可能混着不同的内核。
+              if [ -z "$KERNEL_REF" ]; then
+                echo "::error::选了自研内核,但仓库没配变量 APEX_KERNEL_REF(填客户端内核的标签,如 client-v0.1.1)"
+                exit 1
+              fi
+              echo "✅ 内核: 自研($KERNEL_REF)"
               ;;
             *)
               echo "::error::不认识的内核 \"$WANT_CORE\"(只支持 official / smart / apex)"
@@ -1291,7 +1297,7 @@ jobs:
           ALLOW_INSECURE_TLS:   ${{ fromJSON(inputs.mw || '{}').allow_insecure_tls }}
           APEX_UI:              ${{ fromJSON(inputs.mw || '{}').ui }}
           APEX_CORE:            ${{ fromJSON(inputs.mw || '{}').core }}
-          # core=apex(自研内核,目前只有桌面端)时从这里取源码:地址放密钥里(可带令牌),版本放变量里。
+          # core=apex(自研内核)时从这里取源码:地址放密钥里(可带令牌),版本放变量里(填标签)。
           APEX_KERNEL_REPO:     ${{ secrets.APEX_KERNEL_REPO }}
           APEX_KERNEL_REF:      ${{ vars.APEX_KERNEL_REF }}
           APEX_SMART_LGBM:      ${{ fromJSON(inputs.mw || '{}').smart_lgbm }}
@@ -1989,13 +1995,18 @@ jobs:
                 echo "::error::选了自研内核,但仓库没配密钥 APEX_KERNEL_REPO"
                 exit 1
               fi
-              if ! grep -q '"apex" ]]; then' scripts/build-mihomo.sh 2>/dev/null; then
+              if [ -z "$APEX_KERNEL_REF" ]; then
+                echo "::error::选了自研内核,但仓库没配变量 APEX_KERNEL_REF"
+                exit 1
+              fi
+              if ! grep -q '"apex" ]]; then' scripts/build-mihomo.sh 2>/dev/null \
+                 || ! grep -q 'apex_neutralize' scripts/fetch_mihomo_source.sh 2>/dev/null; then
                 echo "::error::这个源码版本的 scripts/build-mihomo.sh 不会编自研内核"
                 exit 1
               fi
               ;;
             *)
-              echo "::error::不认识的内核 \"$APEX_CORE\"(只支持 official / smart)"
+              echo "::error::不认识的内核 \"$APEX_CORE\"(只支持 official / smart / apex)"
               exit 1
               ;;
           esac
