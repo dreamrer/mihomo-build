@@ -1208,6 +1208,35 @@ jobs:
           fi
           echo "[guard] Flutter 版本串干净"
 
+      # 【2026-10-16 打包失败】Flutter 的 Android 插件(如 jni)要的 NDK 版本跟着 Flutter 走
+      # (3.47.5 = 28.2.13676358),runner 镜像里没有 → 每次在 Gradle 构建**途中**下载。下坏一次
+      # ("Archive is not a ZIP archive")就留下半截目录,后面 3 次重试全报"缺 source.properties"。
+      # 这里提前单独装好(带重试、校验装完整),装不上也不拦,交给构建自己再试。
+      - name: Pre-install Flutter's NDK (Android)
+        if: matrix.platform == 'android' && (github.event_name == 'push' || inputs.platforms == '' || contains(inputs.platforms, matrix.platform))
+        shell: bash
+        run: |
+          set -u
+          FR="${FLUTTER_ROOT:-$(dirname "$(dirname "$(command -v flutter)")")}"
+          NDKV=$(grep -rh 'val ndkVersion: String = "' "$FR/packages/flutter_tools/gradle/src/main" 2>/dev/null \
+            | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [ -z "$NDKV" ] || [ -z "$SDK" ]; then
+            echo "::warning::读不到 Flutter 要的 NDK 版本或 SDK 位置,跳过预装(NDKV=$NDKV SDK=$SDK)"; exit 0
+          fi
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SM" ] || SM=$(command -v sdkmanager || true)
+          for i in 1 2 3; do
+            if [ -f "$SDK/ndk/$NDKV/source.properties" ]; then echo "NDK $NDKV 已就绪"; exit 0; fi
+            rm -rf "$SDK/ndk/$NDKV"
+            echo "安装 NDK $NDKV(第 $i 次)"
+            yes | "$SM" --install "ndk;$NDKV" > /tmp/ndk-install.log 2>&1 || tail -5 /tmp/ndk-install.log
+            [ -f "$SDK/ndk/$NDKV/source.properties" ] && { echo "NDK $NDKV 安装完成"; exit 0; }
+            sleep $((i * 20))
+          done
+          rm -rf "$SDK/ndk/$NDKV"
+          echo "::warning::NDK $NDKV 预装 3 次都没装完整,交给构建自己下载"
+
       - name: Setup flutter_distributor (Windows)
         if: matrix.platform == 'windows'
         run: |
@@ -1340,6 +1369,13 @@ jobs:
             if [ "$n" -ge "$max" ]; then
               echo "::error::${{ matrix.platform }} 构建重试 $max 次仍失败"
               exit 1
+            fi
+            # 上一次下坏的 NDK 会留下半截目录(没有 source.properties),不删的话重试必然同样失败。
+            SDKD="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+            if [ -n "$SDKD" ] && [ -d "$SDKD/ndk" ]; then
+              for d in "$SDKD"/ndk/*/; do
+                [ -f "${d}source.properties" ] || { echo "删除没装完整的 NDK: $d"; rm -rf "$d"; }
+              done
             fi
             wait=$((n * 30))
             echo "::warning::${{ matrix.platform }} 构建失败(第 $n/$max 次),${wait}s 后重试(多为 Go module / Maven 网络抖动)…"
