@@ -109,26 +109,32 @@ class Plugin extends AbstractPlugin
     }
 
     /**
-     * 真实客户端 IP:CDN / 反代后面 $request->ip() 往往是代理地址。只用于展示给用户本人看,
-     * 不做任何鉴权,所以信任这几个常见头是可以接受的。
+     * 真实客户端 IP(只用于展示给用户本人看,不做鉴权)。
+     *
+     * 【先用面板自己算出的 IP · 2026-10-16】原来先看 X-Real-IP:面板在 Docker 里、前面两层代理时,
+     * 里层代理把 X-Real-IP 写成 Docker 网关(172.18.0.1),所有设备都显示 172.18.*.*;而真实 IP
+     * 在 X-Forwarded-For 里,Xboard 的 TrustProxies(信任 CF 段和内网段)早就据此算对了
+     * —— 面板自己记录的就是真实 IP。所以先用 $request->ip();它是内网 / 保留地址时,再从几个
+     * 常见头里挑第一个公网地址;都没有就退回第一个合法地址。
      */
     private static function clientIp($request): string
     {
-        foreach (['CF-Connecting-IP', 'X-Real-IP'] as $h) {
-            $v = trim((string) $request->header($h));
+        $candidates = [(string) $request->ip(), trim((string) $request->header('CF-Connecting-IP'))];
+        foreach (explode(',', (string) $request->header('X-Forwarded-For')) as $v) {
+            $candidates[] = trim($v);
+        }
+        $candidates[] = trim((string) $request->header('X-Real-IP'));
+        foreach ($candidates as $v) {
+            if ($v !== '' && filter_var($v, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE)) {
+                return $v;
+            }
+        }
+        foreach ($candidates as $v) {
             if ($v !== '' && filter_var($v, FILTER_VALIDATE_IP)) {
                 return $v;
             }
         }
-        $xff = (string) $request->header('X-Forwarded-For');
-        if ($xff !== '') {
-            $first = trim(explode(',', $xff)[0]);
-            if (filter_var($first, FILTER_VALIDATE_IP)) {
-                return $first;
-            }
-        }
-        $ip = (string) $request->ip();
-        return filter_var($ip, FILTER_VALIDATE_IP) ? $ip : '';
+        return '';
     }
 
     /** 只留 ASCII 可打印字符,去掉 | (本格式的分隔符)。 */
