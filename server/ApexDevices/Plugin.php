@@ -116,10 +116,15 @@ class Plugin extends AbstractPlugin
      * 在 X-Forwarded-For 里,Xboard 的 TrustProxies(信任 CF 段和内网段)早就据此算对了
      * —— 面板自己记录的就是真实 IP。所以先用 $request->ip();它是内网 / 保留地址时,再从几个
      * 常见头里挑第一个公网地址;都没有就退回第一个合法地址。
+     *
+     * 【面板在 Cloudflare 后面:先认 CF-Connecting-IP · 2026-10-20 真机】快连面板走 CF,手机直连真实
+     * IP 是 111.127.x.x,登录设备里却显示 104.23.*.*(CF 节点)——面板算出的 ip() 就是 CF 节点,
+     * 它也是公网地址,被直接采用。CF-Connecting-IP 是 CF 写进去的真实客户端 IP,有它就先用。
+     * (源站被人绕过 CF 直连时这个头能伪造,但只影响他自己在列表里显示的 IP,这里不做鉴权。)
      */
     private static function clientIp($request): string
     {
-        $candidates = [(string) $request->ip(), trim((string) $request->header('CF-Connecting-IP'))];
+        $candidates = [trim((string) $request->header('CF-Connecting-IP')), (string) $request->ip()];
         foreach (explode(',', (string) $request->header('X-Forwarded-For')) as $v) {
             $candidates[] = trim($v);
         }
