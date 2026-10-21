@@ -1609,6 +1609,13 @@ jobs:
             fi
             echo "[thin] $ARCH: 变薄 $THINNED 个文件,$(du -sh "$THIN_APP" | cut -f1)"
             echo "[thin] $ARCH: $(lipo -info "$THIN_APP/Contents/MacOS/ApexCore" 2>/dev/null | sed 's/.*: //')"
+            # 【Intel Mac 关 Impeller · 2026-10-21,照 FlClash】Flutter 3.47 起桌面默认用 Impeller,
+            # Intel Mac 上滚动 / 动画时整窗闪烁、文字花(flutter/flutter#191538,3.47.x 都没修)。
+            # 只改 Intel 单芯片包,退回 Skia;Apple 芯片不受影响。必须在重新签名之前改(签名覆盖 Info.plist)。
+            if [ "$ARCH" = "x86_64" ]; then
+              plutil -replace FLTEnableImpeller -bool NO "$THIN_APP/Contents/Info.plist"
+              echo "[thin] x86_64: FLTEnableImpeller=$(/usr/libexec/PlistBuddy -c 'Print :FLTEnableImpeller' "$THIN_APP/Contents/Info.plist")"
+            fi
             find "$THIN_APP" -name "*.framework" -o -name "*.dylib" | while read fw; do
               codesign --force --deep --sign - "$fw" 2>/dev/null || true
             done
