@@ -1856,11 +1856,11 @@ jobs:
           PEM
           sed -i.bak 's/^ *//' "$T/sym_pub.pem"
           mkdir -p symbols-enc
-          tar -czf "$T/symbols.tgz" -C build symbols
+          tar -czf symbols.tgz -C build symbols   # 相对路径:Git-Bash 的 tar 会把 D:\ 的冒号当远程主机
           K=$(openssl rand -hex 32); IV=$(openssl rand -hex 16)
-          openssl enc -aes-256-cbc -K "$K" -iv "$IV" -in "$T/symbols.tgz" -out symbols-enc/symbols.tgz.enc
+          openssl enc -aes-256-cbc -K "$K" -iv "$IV" -in symbols.tgz -out symbols-enc/symbols.tgz.enc
           printf '%s %s' "$K" "$IV" | openssl pkeyutl -encrypt -pubin -inkey "$T/sym_pub.pem" -out symbols-enc/symbols.key.enc
-          rm -f "$T/symbols.tgz"
+          rm -f symbols.tgz
           echo "ok=1" >> "$GITHUB_OUTPUT"
           ls -la symbols-enc
 
