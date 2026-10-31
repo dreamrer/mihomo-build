@@ -1822,12 +1822,16 @@ jobs:
           overwrite: true
 
       # Dart 代码混淆后的调试符号(setup.dart --split-debug-info=build/symbols/...),不进安装包。
-      # 本仓库是公开的,Actions 产物谁都能下:符号能把混淆还原,所以**加密后才上传**。
+      # 本仓库是公开的,产物谁都能下:符号能把混淆还原,所以**加密后才上传**。
       # 用下面的公钥加密(随机 AES 密钥加密文件,公钥加密 AES 密钥);私钥只在维护者本机
-      # (~/.config/apex/symbols_key.pem),不进任何仓库。解密见 README / 维护者笔记。
+      # (~/.config/apex/symbols_key.pem),不进任何仓库。
+      # 按构建号(崩溃堆栈里的 build_id / Sentry 事件的 code_id)一份一份加密:<构建号>.tgz.enc +
+      # <构建号>.key.enc。下面 archive-symbols 任务把它们存进本仓库的发布页 symbols-<年-月>(不过期、
+      # 机器人清理构建记录也不删),存好后删掉这里的临时产物。还原工具:tools/symbolize.py。
       # 只在本次真出了安装包时才传(dist 为空 = 构建失败,别让机器人以为有产物)。
       - name: Encrypt debug symbols
         id: symbols
+        continue-on-error: true   # 符号出问题不能让客户的构建失败
         if: |
           (github.event_name == 'push' ||
            inputs.platforms == '' ||
@@ -1838,6 +1842,7 @@ jobs:
           set -euo pipefail
           if [ ! -d build/symbols ]; then echo "没有符号目录,跳过"; exit 0; fi
           T="${RUNNER_TEMP:-/tmp}"
+          PY=$(command -v python3 || command -v python)
           cat > "$T/sym_pub.pem" <<'PEM'
             -----BEGIN PUBLIC KEY-----
             MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEApmioR2O/As9ZUMcf2/zc
@@ -1855,15 +1860,64 @@ jobs:
             -----END PUBLIC KEY-----
           PEM
           sed -i.bak 's/^ *//' "$T/sym_pub.pem"
+          # 构建号:ELF(安卓 / Windows / Linux)取 GNU build-id,Mach-O(macOS)取 LC_UUID。
+          # 和 tools/symbolize.py 里的 build_id() 是同一段逻辑,改一边要改另一边。
+          cat > "$T/sym_ids.py" <<'PYEOF'
+          import os, struct, sys
+          def build_id(path):
+              d = open(path, 'rb').read()
+              if d[:4] in (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe'):
+                  ncmds, = struct.unpack_from('<I', d, 16); p = 32 if d[0] == 0xcf else 28
+                  for _ in range(ncmds):
+                      cmd, size = struct.unpack_from('<II', d, p)
+                      if cmd == 0x1b: return d[p+8:p+24].hex()
+                      p += size
+                  return None
+              if d[:4] != b'\x7fELF': return None
+              is64 = d[4] == 2; le = '<' if d[5] == 1 else '>'
+              if is64:
+                  shoff, = struct.unpack_from(le+'Q', d, 0x28); es, n = struct.unpack_from(le+'HH', d, 0x3A)
+              else:
+                  shoff, = struct.unpack_from(le+'I', d, 0x20); es, n = struct.unpack_from(le+'HH', d, 0x2E)
+              for i in range(n):
+                  o = shoff + i*es
+                  typ, = struct.unpack_from(le+'I', d, o+4)
+                  if typ != 7: continue
+                  off, size = struct.unpack_from(le+('QQ' if is64 else 'II'), d, o+(0x18 if is64 else 0x10))
+                  p = off
+                  while p < off+size:
+                      nsz, dsz, nt = struct.unpack_from(le+'III', d, p); p += 12
+                      name = d[p:p+nsz]; p += (nsz+3) & ~3
+                      desc = d[p:p+dsz]; p += (dsz+3) & ~3
+                      if nt == 3 and name.rstrip(b'\0') == b'GNU': return desc.hex()
+              return None
+          seen = set()
+          for root, _, files in os.walk(sys.argv[1]):
+              for f in sorted(files):
+                  if not f.endswith('.symbols'): continue
+                  path = os.path.join(root, f)
+                  bid = build_id(path)
+                  if not bid: print('读不出构建号:', path, file=sys.stderr); continue
+                  if bid in seen: continue   # 同一架构在通用包和分架构包里是同一份
+                  seen.add(bid)
+                  print(bid, os.path.relpath(path, sys.argv[1]).replace(os.sep, '/'))
+          PYEOF
           mkdir -p symbols-enc
-          tar -czf symbols.tgz -C build symbols   # 相对路径:Git-Bash 的 tar 会把 D:\ 的冒号当远程主机
-          K=$(openssl rand -hex 32); IV=$(openssl rand -hex 16)
-          openssl enc -aes-256-cbc -K "$K" -iv "$IV" -in symbols.tgz -out symbols-enc/symbols.tgz.enc
-          printf '%s %s' "$K" "$IV" | openssl pkeyutl -encrypt -pubin -inkey "$T/sym_pub.pem" -out symbols-enc/symbols.key.enc
-          rm -f symbols.tgz
+          "$PY" "$T/sym_ids.py" build/symbols > "$T/sym_ids.txt"
+          cat "$T/sym_ids.txt"
+          if [ ! -s "$T/sym_ids.txt" ]; then echo "::warning::有符号目录但一个构建号都没读出来"; exit 0; fi
+          while read -r BID REL; do
+            # 相对路径打包:Git-Bash 的 tar 会把 D:\ 的冒号当远程主机
+            tar -czf "sym_$BID.tgz" -C build/symbols "$REL"
+            K=$(openssl rand -hex 32); IV=$(openssl rand -hex 16)
+            openssl enc -aes-256-cbc -K "$K" -iv "$IV" -in "sym_$BID.tgz" -out "symbols-enc/$BID.tgz.enc"
+            printf '%s %s' "$K" "$IV" | openssl pkeyutl -encrypt -pubin -inkey "$T/sym_pub.pem" -out "symbols-enc/$BID.key.enc"
+            rm -f "sym_$BID.tgz"
+          done < "$T/sym_ids.txt"
           echo "ok=1" >> "$GITHUB_OUTPUT"
           ls -la symbols-enc
 
+      # 临时产物,交给 archive-symbols 存进发布页;存档失败时留着(90 天)当后备。
       - name: Upload debug symbols (encrypted)
         if: steps.symbols.outputs.ok == '1'
         uses: actions/upload-artifact@v4
@@ -2371,6 +2425,50 @@ jobs:
               "disable_web_page_preview": True,
           })
           PYEOF
+
+  # 把各平台加密后的调试符号存进本仓库发布页 symbols-<年-月>(按构建号命名,不过期,
+  # 机器人删构建记录也不受影响),存好后删掉本次的 symbols-* 临时产物。
+  # continue-on-error:存档失败不能让整次构建显示失败(机器人按结论判断成败、退款)。
+  archive-symbols:
+    needs: [build]
+    if: always() && needs.build.result != 'skipped'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Download encrypted symbols
+        id: dl
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          path: ./symbols-enc
+          pattern: symbols-*
+          merge-multiple: true
+
+      - name: Store in release and remove temporary artifacts
+        if: steps.dl.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          cd symbols-enc 2>/dev/null || { echo "本次没有调试符号"; exit 0; }
+          ls *.tgz.enc >/dev/null 2>&1 || { echo "本次没有调试符号"; exit 0; }
+          TAG="symbols-$(date -u +%Y-%m)"
+          # 几个构建可能同时建同一个发布页:建失败再查一次,还没有才算失败。
+          if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$REPO" --prerelease --latest=false \
+              --title "$TAG" --notes "加密的调试符号,按构建号命名。只有维护者私钥能解开,还原工具见 tools/symbolize.py。" \
+              || gh release view "$TAG" -R "$REPO" >/dev/null
+          fi
+          gh release upload "$TAG" -R "$REPO" --clobber ./*.tgz.enc ./*.key.enc
+          echo "已存入发布页 $TAG:"; ls -1 *.tgz.enc
+          ids=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts?per_page=100" \
+            -q '.artifacts[] | select(.name | startswith("symbols-")) | .id')
+          for id in $ids; do gh api -X DELETE "repos/$REPO/actions/artifacts/$id" || true; done
 
   release:
     needs: [build, openwrt]
