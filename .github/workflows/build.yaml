@@ -2220,6 +2220,19 @@ jobs:
             [ -f "$UI_SRC/index.html" ] && echo "  metacubexd OK" \
               || echo "  ⚠️ metacubexd 下载失败,退回运行时下载"
           fi
+          # Geo 数据随包带(和客户端一样):面板订阅的规则都用 GEOIP / GEOSITE,内核首次启动要是
+          # 没有这两个文件会去 GitHub 下载,而路由器此时还没代理 —— 装好了起不来。这里下不到
+          # 就让构建失败,别出一个装上就起不来的包。文件名按内核的默认名(GeoSite.dat 大小写敏感)。
+          GEO_SRC="/tmp/mihomo-geo"
+          mkdir -p "$GEO_SRC"
+          for pair in geoip.metadb:geoip.metadb geosite.dat:GeoSite.dat; do
+            src="${pair%%:*}"; dst="${pair##*:}"
+            [ -s "$GEO_SRC/$dst" ] && continue
+            curl -fsSL --retry 3 --connect-timeout 15 --max-time 180 -o "$GEO_SRC/$dst" \
+              "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/$src" \
+              || { echo "::error::Geo 数据下载失败: $src"; exit 1; }
+          done
+          ls -la "$GEO_SRC"
           mkdir -p dist
 
           CFG="openwrt/etc/config/mihomo"
@@ -2271,6 +2284,7 @@ jobs:
             if [ -f "$UI_SRC/index.html" ]; then
               cp -r "$UI_SRC/." "$pkg/etc/mihomo/ui/"
             fi
+            cp "$GEO_SRC/geoip.metadb" "$GEO_SRC/GeoSite.dat" "$pkg/etc/mihomo/"
 
             (cd "$pkg" && tar czf /tmp/data.tar.gz .)
             local ipk_arch ctl
@@ -2302,8 +2316,10 @@ jobs:
               printf 'exit 0\n'
             } > "$ctl/prerm"
             chmod 755 "$ctl/postinst" "$ctl/prerm"
+            # 升级包时保留用户的面板账号 / 设置(没有这行 opkg 会用包里的默认配置盖掉)。
+            printf '/etc/config/mihomo\n' > "$ctl/conffiles"
 
-            (cd "$ctl" && tar czf /tmp/control.tar.gz ./control ./postinst ./prerm)
+            (cd "$ctl" && tar czf /tmp/control.tar.gz ./control ./conffiles ./postinst ./prerm)
             echo "2.0" > /tmp/debian-binary
 
             local ipk_name="${PKG_NAME}_${VER}_${ipk_arch}.ipk"
