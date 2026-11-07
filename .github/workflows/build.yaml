@@ -1769,6 +1769,11 @@ jobs:
           APP_UUID="${HASH:0:8}-${HASH:8:4}-${HASH:12:4}-${HASH:16:4}-${HASH:20:12}"
 
           echo "Inno: AppName=$APP_NAME  BinaryExe=$BINARY_EXE  Package=$PKG_NAME  Service=$HELPER_SVC  AppVersion=$APP_VERSION  AppId=$APP_UUID"
+          # 给下面的冒烟测试用(都不是密钥)
+          {
+            echo "APEX_SMOKE_BIN=$BINARY_EXE"
+            echo "APEX_SMOKE_APPID=$APP_UUID"
+          } >> "$GITHUB_ENV"
 
           if [ -f "update_installer.iss" ]; then
             mkdir -p dist
@@ -1783,6 +1788,24 @@ jobs:
           else
             echo "[installer] update_installer.iss not found, skipping"
           fi
+
+      # 真装 / 真升级 / 真卸载一遍(含 TUN 组件按 App 的方式建服务)。先不挡发包(continue-on-error),
+      # 结果看这一步的日志;稳定几次后再改成失败就不发包。
+      - name: Smoke-test Windows installer
+        if: matrix.platform == 'windows'
+        continue-on-error: true
+        timeout-minutes: 25
+        shell: pwsh
+        env:
+          APP_NAME_RAW: ${{ inputs.app_name }}
+          APP_NAME_EN_RAW: ${{ inputs.app_name_en }}
+        run: |
+          $inst = Get-ChildItem dist -Filter '*-setup.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $inst) { '没有安装包,跳过'; exit 0 }
+          $name = if ($env:APP_NAME_RAW) { $env:APP_NAME_RAW } else { 'Apex' }
+          $nameEn = if ($env:APP_NAME_EN_RAW) { $env:APP_NAME_EN_RAW } else { 'Apex' }
+          ./.apex-build-tools/scripts/win_installer_smoke.ps1 -Installer $inst.FullName -Bin $env:APEX_SMOKE_BIN `
+            -AppName $name -AppNameEn $nameEn -AppId $env:APEX_SMOKE_APPID
 
       - name: Drop Windows portable zip (ship installer only)
         if: matrix.platform == 'windows'
