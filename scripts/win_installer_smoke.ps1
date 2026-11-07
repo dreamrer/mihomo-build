@@ -116,7 +116,14 @@ Check '升级后主程序还在' (Test-Path -LiteralPath $main)
 if ($directUp) { Note '升级时结束了直跑的组件' ($direct.HasExited) '(32 位 PowerShell 按路径结束不了 64 位进程?)' }
 if (-not $direct.HasExited) { Stop-Process -Id $direct.Id -Force -ErrorAction SilentlyContinue }
 if ($svcName) {
-  Note '升级后 TUN 服务还在(不用重新授权)' ($null -ne (Get-Service $svcName -ErrorAction SilentlyContinue)) '(升级会删服务,用户要再授权一次)'
+  # 2026-11-07 起新安装程序会把服务照原样建回来(update_installer.iss RestoreHelperService)
+  Check '升级后 TUN 服务还在(不用重新授权)' ($null -ne (Get-Service $svcName -ErrorAction SilentlyContinue))
+  Check '升级后 TUN 服务在跑' (Retry { (Get-Service $svcName).Status -eq 'Running' } 20)
+  $r2 = ''
+  try { $r2 = PipeGet $j.pipe '/version' } catch { $r2 = "$_" }
+  Check '升级后组件照常在管道上答话' ($r2 -match 'x-apex-helper-reject: exe_mismatch') $r2
+  $p2 = (Get-CimInstance Win32_Service -Filter "Name='$svcName'").PathName
+  Check '升级后服务命令行没变' ($p2 -eq $j.binPath) "got: $p2"
 }
 
 # ─── D. 卸载 ─────────────────────────────────────────────────────────────
@@ -124,7 +131,7 @@ $code = Run (Join-Path $root 'unins000.exe') "/VERYSILENT /SUPPRESSMSGBOXES /NOR
 "卸载程序第一段退出码 $code"
 # 第一段马上退出,真正干活的是带 /SECONDPHASE 的子进程
 Check '卸载跑完(卸载项消失)' (Retry { -not ($key -and (Test-Path $key)) } 180)
-Check '安装目录删掉了' (Retry { -not (Test-Path -LiteralPath $root) } 60) ((Get-ChildItem -LiteralPath $root -Recurse -ErrorAction SilentlyContinue | Select-Object -First 10 | ForEach-Object FullName) -join '; ')
+Check '安装目录删掉了' (Retry { -not (Test-Path -LiteralPath $root) } 60) ((Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue | Select-Object -First 10 | ForEach-Object FullName) -join '; ')
 if ($svcName) { Check '服务删掉了' (Retry { -not (Get-Service $svcName -ErrorAction SilentlyContinue) } 30) }
 Check '没有残留进程' (-not (Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith($root) }))
 
