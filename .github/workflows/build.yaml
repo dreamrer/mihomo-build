@@ -204,6 +204,32 @@ jobs:
           fi
           if [ -n "$r" ]; then echo "::add-mask::$r"; fi
 
+      - name: Mask brand secrets
+        # 【2026-11-07】这个仓库是公开的,后面各步的 env 会把打包参数原样列进日志:原来各品牌的
+        # XOR_KEY、路径加密密钥、OSS 地址都以明文挂在 Actions 日志里。同上,从事件文件读、不展开。
+        run: |
+          ev="$GITHUB_EVENT_PATH"
+          get() {
+            if command -v jq >/dev/null 2>&1; then
+              jq -r "$1 // empty" "$ev" 2>/dev/null || true
+            else
+              python3 -c 'import json,sys
+          d=json.load(open(sys.argv[1])).get("inputs") or {}
+          k=sys.argv[2]
+          if k=="aes_key":
+              try: v=(json.loads(d.get("mw") or "{}") or {}).get("aes_key","")
+              except Exception: v=""
+          else: v=d.get(k,"")
+          print(v or "")' "$ev" "$2" 2>/dev/null || true
+            fi
+          }
+          for k in xor_key oss_url_1 oss_url_2 oss_url_3 oss_url_4; do
+            v=$(get ".inputs.$k" "$k")
+            if [ -n "$v" ]; then echo "::add-mask::$v"; fi
+          done
+          v=$(get '.inputs.mw | (try fromjson catch {}) | .aes_key' aes_key)
+          if [ -n "$v" ]; then echo "::add-mask::$v"; fi
+
       - name: Configure git credentials
         env:
           GH_TOKEN_FOR_PRIVATE: ${{ secrets.PRIVATE_REPO_TOKEN }}
@@ -2094,6 +2120,32 @@ jobs:
             r=$(sed -n 's/.*"source_repo"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$GITHUB_EVENT_PATH" 2>/dev/null | head -1)
           fi
           if [ -n "$r" ]; then echo "::add-mask::$r"; fi
+
+      - name: Mask brand secrets
+        # 【2026-11-07】这个仓库是公开的,后面各步的 env 会把打包参数原样列进日志:原来各品牌的
+        # XOR_KEY、路径加密密钥、OSS 地址都以明文挂在 Actions 日志里。同上,从事件文件读、不展开。
+        run: |
+          ev="$GITHUB_EVENT_PATH"
+          get() {
+            if command -v jq >/dev/null 2>&1; then
+              jq -r "$1 // empty" "$ev" 2>/dev/null || true
+            else
+              python3 -c 'import json,sys
+          d=json.load(open(sys.argv[1])).get("inputs") or {}
+          k=sys.argv[2]
+          if k=="aes_key":
+              try: v=(json.loads(d.get("mw") or "{}") or {}).get("aes_key","")
+              except Exception: v=""
+          else: v=d.get(k,"")
+          print(v or "")' "$ev" "$2" 2>/dev/null || true
+            fi
+          }
+          for k in xor_key oss_url_1 oss_url_2 oss_url_3 oss_url_4; do
+            v=$(get ".inputs.$k" "$k")
+            if [ -n "$v" ]; then echo "::add-mask::$v"; fi
+          done
+          v=$(get '.inputs.mw | (try fromjson catch {}) | .aes_key' aes_key)
+          if [ -n "$v" ]; then echo "::add-mask::$v"; fi
 
       - name: Configure git credentials
         env:
