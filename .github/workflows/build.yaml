@@ -2147,6 +2147,22 @@ jobs:
           APP_NAME_RAW:      ${{ inputs.app_name || 'mihomo' }}
           VER_RAW:           ${{ steps.version.outputs.version }}
           APEX_CORE:         ${{ fromJSON(inputs.mw || '{}').core }}
+          # 面板对接程序 apex-agent 打包进去的值(和 App 同一组):OSS / 面板类型 / UA / 路径加密 / 白名单
+          OSS_URL_1:         ${{ inputs.oss_url_1 }}
+          OSS_URL_2:         ${{ inputs.oss_url_2 }}
+          OSS_URL_3:         ${{ inputs.oss_url_3 }}
+          OSS_URL_4:         ${{ inputs.oss_url_4 }}
+          PANEL_TYPE:        ${{ inputs.panel_type || 'xboard' }}
+          API_PREFIX:        ${{ inputs.api_prefix || '/api/v1' }}
+          DEFAULT_UA:        ${{ inputs.default_ua }}
+          APP_NAME_EN:       ${{ inputs.app_name_en }}
+          APEX_MW_ENABLED:     ${{ fromJSON(inputs.mw || '{}').enabled }}
+          APEX_MW_AES_KEY:     ${{ fromJSON(inputs.mw || '{}').aes_key }}
+          APEX_MW_PATH_PREFIX: ${{ fromJSON(inputs.mw || '{}').path_prefix }}
+          APEX_MW_SUB_PREFIX:  ${{ fromJSON(inputs.mw || '{}').sub_prefix }}
+          APEX_MW_EXT:         ${{ fromJSON(inputs.mw || '{}').ext }}
+          APEX_ALLOWED_DOMAINS: ${{ fromJSON(inputs.mw || '{}').allowed_domains }}
+          ALLOW_INSECURE_TLS:   ${{ fromJSON(inputs.mw || '{}').allow_insecure_tls }}
           APEX_KERNEL_REPO:  ${{ secrets.APEX_KERNEL_REPO }}
           APEX_KERNEL_REF:   ${{ vars.APEX_KERNEL_REF }}
         run: |
@@ -2246,6 +2262,24 @@ jobs:
           ' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
           echo "openwrt config injected: xor_key=$([ -n "$INJ_KEY" ] && echo set || echo empty) apex_flag=${APEX_FLAG:-apex}"
 
+          # apex-agent:打包值先生成进源码(值只写进文件,不进日志),每个架构再编一份。
+          # 老版本源码没有 openwrt/agent → 不编(它的 init 脚本也还是老的 shell 登录)。
+          HAS_AGENT=""
+          if [ -f openwrt/agent/go.mod ]; then
+            HAS_AGENT=1
+            APEX_UA="$DEFAULT_UA"
+            if [ -z "$APEX_UA" ]; then
+              APEX_UA="${APP_NAME_EN:-Apex}/v$VER"
+            fi
+            APEX_UA="${APEX_UA//\$\{version\}/$VER}"; APEX_UA="${APEX_UA//\$version/$VER}"
+            APEX_UA="${APEX_UA//\$\{appNameEn\}/${APP_NAME_EN:-Apex}}"; APEX_UA="${APEX_UA//\$appNameEn/${APP_NAME_EN:-Apex}}"
+            export APEX_UA XOR_KEY APEX_FLAG ENABLE_ENCRYPTION OSS_URL_1 OSS_URL_2 OSS_URL_3 OSS_URL_4 \
+              PANEL_TYPE API_PREFIX APEX_MW_ENABLED APEX_MW_AES_KEY APEX_MW_PATH_PREFIX APEX_MW_SUB_PREFIX \
+              APEX_MW_EXT APEX_ALLOWED_DOMAINS ALLOW_INSECURE_TLS
+            (cd openwrt/agent && go test ./... && go run ./gen > baked_gen.go)
+            echo "apex-agent: ua=$APEX_UA oss=$([ -n "$OSS_URL_1$OSS_URL_2$OSS_URL_3$OSS_URL_4" ] && echo set || echo empty) mw=${APEX_MW_ENABLED:-false}"
+          fi
+
           ipk_arch_names() {
             case "$1" in
               amd64)  echo "x86_64" ;;
@@ -2272,6 +2306,11 @@ jobs:
 
             cp "/tmp/mihomo-$arch" "$pkg/usr/bin/mihomo"
             chmod 755 "$pkg/usr/bin/mihomo"
+            if [ -n "$HAS_AGENT" ]; then
+              GOOS=linux GOARCH="$goarch" GOARM="$goarm" GOMIPS="$gomips" CGO_ENABLED=0 \
+                go build -C openwrt/agent -trimpath -ldflags="-s -w" -o "$pkg/usr/bin/apex-agent" .
+              chmod 755 "$pkg/usr/bin/apex-agent"
+            fi
             cp openwrt/etc/init.d/mihomo "$pkg/etc/init.d/mihomo"
             chmod 755 "$pkg/etc/init.d/mihomo"
             cp openwrt/etc/config/mihomo "$pkg/etc/config/mihomo"
@@ -2301,6 +2340,10 @@ jobs:
             {
               printf '#!/bin/sh\n'
               printf '[ -n "${IPKG_INSTROOT}" ] && exit 0\n'
+              # 同 OpenWrt SDK 的 default_postinst:装完当场跑首次初始化(生成控制接口密码、收紧
+              # 配置权限)并删掉,不然要等下次重启才跑 —— 装完直接启动 = 9090 无密码对全网段开放。
+              printf 'f=/etc/uci-defaults/99-mihomo\n'
+              printf '[ -f "$f" ] && ( . "$f" ) && rm -f "$f"\n'
               printf '/etc/init.d/mihomo enable 2>/dev/null || true\n'
               printf 'echo "[%s] installed. Run: /etc/init.d/mihomo start"\n' "$APP_NAME"
               printf 'exit 0\n'
@@ -2358,6 +2401,9 @@ jobs:
             printf 'uci -q get mihomo.config >/dev/null 2>&1 || uci set mihomo.config=config\n'
             printf 'uci set mihomo.config.app_name="%s"\n' "$APP_NAME"
             printf 'uci commit mihomo\n'
+            printf 'chmod 600 /etc/config/mihomo 2>/dev/null\n'
+            # 这里已做完 99-luci-app-mihomo 的事,删掉免得下次开机再跑一遍。
+            printf 'rm -f /etc/uci-defaults/99-luci-app-mihomo\n'
             printf 'rm -f /tmp/luci-indexcache /tmp/luci-indexcache.*\n'
             printf 'rm -rf /tmp/luci-modulecache/\n'
             printf '/etc/init.d/rpcd reload 2>/dev/null || true\n'
