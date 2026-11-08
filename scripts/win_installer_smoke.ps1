@@ -1,9 +1,10 @@
 # Windows 安装包冒烟测试(2026-11-07):在一次性的 GitHub runner 上真装、真升级、真卸载。
 #   · 安装目录故意带空格、单引号、方括号和中文;
 #   · TUN 组件按 App 真正的注册脚本建服务(源码里的 tool/print_win_helper.dart 生成,不在这里另抄规则);
-#   · 升级前先以管理员直跑一份 TUN 组件占着文件,看安装器能不能把它结束掉(看代码推断 32 位
-#     PowerShell 结束不了 64 位进程,这里实测);
-#   · 升级后服务还在不在(看代码:每次升级都会删)。
+#   · 升级前先以管理员直跑一份 TUN 组件占着文件,看安装器能不能把它结束掉;
+#   · 升级后服务还在不在、还能不能用(2026-11-07 起升级保留服务)。
+#     注意:这里的"升级"是同一个安装包覆盖自己,旧卸载程序就是新代码;
+#     从老版本(≤5.2.6,旧卸载程序会删服务)升上来的路径这里测不到。
 # 只在 CI 里跑(会装服务、改系统),本机不要跑。
 param(
   [Parameter(Mandatory)][string]$Installer,
@@ -51,7 +52,7 @@ function PipeGet([string]$pipe, [string]$path) {
   } finally { $c.Dispose() }
 }
 
-$root = "C:\Apex CI\O'Brien [x] 测试"
+$root = "C:\Apex CI\O'Brien’s [x] 测试"  # ’ 是 PowerShell 的另一种单引号(2026-11-08 审计)
 $log = Join-Path $env:RUNNER_TEMP 'apex-smoke'
 New-Item -ItemType Directory -Force -Path $log | Out-Null
 "installer=$Installer  bin=$Bin  appName=$AppName  dir=$root"
@@ -100,7 +101,6 @@ if (Test-Path 'tool/print_win_helper.dart') {
 }
 
 # ─── C. 覆盖升级 ─────────────────────────────────────────────────────────
-$marker = Join-Path $env:APPDATA 'apex-smoke-marker.txt'
 # 升级前以管理员直跑一份组件(App 装服务失败时的兜底形态),看安装器能不能结束它
 # 带全套参数、换一个服务名(不和上面的服务抢管道名),否则它一启动就因缺参数自己退出,这项就测了个寂寞
 $sid2 = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -113,10 +113,10 @@ Note '直跑的组件起来了(下面这项才有意义)' $directUp
 $code = Run $Installer "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /LOG=`"$log\upgrade.log`""
 Check '覆盖升级退出码 0' ($code -eq 0) "exit=$code"
 Check '升级后主程序还在' (Test-Path -LiteralPath $main)
-if ($directUp) { Note '升级时结束了直跑的组件' ($direct.HasExited) '(32 位 PowerShell 按路径结束不了 64 位进程?)' }
+if ($directUp) { Note '升级时结束了直跑的组件' ($direct.HasExited) '(安装器没能结束占着文件的组件)' }
 if (-not $direct.HasExited) { Stop-Process -Id $direct.Id -Force -ErrorAction SilentlyContinue }
 if ($svcName) {
-  # 2026-11-07 起新安装程序会把服务照原样建回来(update_installer.iss RestoreHelperService)
+  # 2026-11-07 起升级保留服务(update_installer.iss RestoreHelperService);同版本覆盖时服务没被删,这里实际测的是停了之后重新启动
   Check '升级后 TUN 服务还在(不用重新授权)' ($null -ne (Get-Service $svcName -ErrorAction SilentlyContinue))
   Check '升级后 TUN 服务在跑' (Retry { (Get-Service $svcName).Status -eq 'Running' } 20)
   $r2 = ''
@@ -138,7 +138,6 @@ Check '没有残留进程' (-not (Get-Process | Where-Object { $_.Path -and $_.P
 # ─── 收尾 ────────────────────────────────────────────────────────────────
 if ($svcName) { sc.exe delete $svcName *> $null }
 Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
 ""
 "警告 $($warn.Count) 项: $($warn -join ' / ')"
 "失败 $($fail.Count) 项: $($fail -join ' / ')"

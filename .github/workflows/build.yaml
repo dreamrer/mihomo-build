@@ -208,27 +208,47 @@ jobs:
         # 【2026-11-07】这个仓库是公开的,后面各步的 env 会把打包参数原样列进日志:原来各品牌的
         # XOR_KEY、路径加密密钥、OSS 地址都以明文挂在 Actions 日志里。同上,从事件文件读、不展开。
         run: |
-          ev="$GITHUB_EVENT_PATH"
-          get() {
-            if command -v jq >/dev/null 2>&1; then
-              jq -r "$1 // empty" "$ev" 2>/dev/null || true
-            else
-              python3 -c 'import json,sys
-          d=json.load(open(sys.argv[1])).get("inputs") or {}
-          k=sys.argv[2]
-          if k=="aes_key":
-              try: v=(json.loads(d.get("mw") or "{}") or {}).get("aes_key","")
-              except Exception: v=""
-          else: v=d.get(k,"")
-          print(v or "")' "$ev" "$2" 2>/dev/null || true
-            fi
-          }
-          for k in xor_key oss_url_1 oss_url_2 oss_url_3 oss_url_4; do
-            v=$(get ".inputs.$k" "$k")
-            if [ -n "$v" ]; then echo "::add-mask::$v"; fi
-          done
-          v=$(get '.inputs.mw | (try fromjson catch {}) | .aes_key' aes_key)
-          if [ -n "$v" ]; then echo "::add-mask::$v"; fi
+          # 2026-11-08 补全:路径加密的前缀/后缀/扩展名、面板域名白名单、固定邀请码、非默认 flag;
+          # 多行值逐行遮(add-mask 只认一行),逗号列表逐项遮,OSS 地址再单独遮主机名。
+          PY=$(command -v python3 || command -v python || true)
+          if [ -z "$PY" ]; then echo "::error::没有 python,无法遮盖品牌参数"; exit 1; fi
+          "$PY" - "$GITHUB_EVENT_PATH" <<'PYEOF'
+          import json, sys
+          from urllib.parse import urlsplit
+          try:
+              d = json.load(open(sys.argv[1], encoding="utf-8")).get("inputs") or {}
+          except Exception:
+              d = {}
+          try:
+              mw = json.loads(d.get("mw") or "{}") or {}
+          except Exception:
+              mw = {}
+          vals = []
+          for k in ("xor_key", "oss_url_1", "oss_url_2", "oss_url_3", "oss_url_4", "fixed_invite_code"):
+              vals.append(d.get(k) or "")
+          flag = (d.get("apex_flag") or "").strip()
+          if flag and flag != "apex":
+              vals.append(flag)
+          for k in ("aes_key", "path_prefix", "sub_prefix", "ext", "allowed_domains"):
+              v = mw.get(k)
+              if k == "ext" and isinstance(v, str) and len(v) < 6:
+                  v = ""  # .dat 之类太常见,遮了会把日志里的 GeoSite.dat 也抹掉
+              vals.append(v if isinstance(v, str) else (json.dumps(v) if v else ""))
+          out = set()
+          for v in vals:
+              for line in str(v).splitlines():
+                  line = line.strip()
+                  parts = [line] + [p.strip() for p in line.split(",")]
+                  for p in parts:
+                      if p.startswith(("http://", "https://")):
+                          h = urlsplit(p).hostname or ""
+                          if h:
+                              out.add(h)
+                      out.add(p)
+          for v in sorted(out, key=len, reverse=True):
+              if len(v) >= 4:
+                  print("::add-mask::" + v)
+          PYEOF
 
       - name: Configure git credentials
         env:
@@ -2148,27 +2168,47 @@ jobs:
         # 【2026-11-07】这个仓库是公开的,后面各步的 env 会把打包参数原样列进日志:原来各品牌的
         # XOR_KEY、路径加密密钥、OSS 地址都以明文挂在 Actions 日志里。同上,从事件文件读、不展开。
         run: |
-          ev="$GITHUB_EVENT_PATH"
-          get() {
-            if command -v jq >/dev/null 2>&1; then
-              jq -r "$1 // empty" "$ev" 2>/dev/null || true
-            else
-              python3 -c 'import json,sys
-          d=json.load(open(sys.argv[1])).get("inputs") or {}
-          k=sys.argv[2]
-          if k=="aes_key":
-              try: v=(json.loads(d.get("mw") or "{}") or {}).get("aes_key","")
-              except Exception: v=""
-          else: v=d.get(k,"")
-          print(v or "")' "$ev" "$2" 2>/dev/null || true
-            fi
-          }
-          for k in xor_key oss_url_1 oss_url_2 oss_url_3 oss_url_4; do
-            v=$(get ".inputs.$k" "$k")
-            if [ -n "$v" ]; then echo "::add-mask::$v"; fi
-          done
-          v=$(get '.inputs.mw | (try fromjson catch {}) | .aes_key' aes_key)
-          if [ -n "$v" ]; then echo "::add-mask::$v"; fi
+          # 2026-11-08 补全:路径加密的前缀/后缀/扩展名、面板域名白名单、固定邀请码、非默认 flag;
+          # 多行值逐行遮(add-mask 只认一行),逗号列表逐项遮,OSS 地址再单独遮主机名。
+          PY=$(command -v python3 || command -v python || true)
+          if [ -z "$PY" ]; then echo "::error::没有 python,无法遮盖品牌参数"; exit 1; fi
+          "$PY" - "$GITHUB_EVENT_PATH" <<'PYEOF'
+          import json, sys
+          from urllib.parse import urlsplit
+          try:
+              d = json.load(open(sys.argv[1], encoding="utf-8")).get("inputs") or {}
+          except Exception:
+              d = {}
+          try:
+              mw = json.loads(d.get("mw") or "{}") or {}
+          except Exception:
+              mw = {}
+          vals = []
+          for k in ("xor_key", "oss_url_1", "oss_url_2", "oss_url_3", "oss_url_4", "fixed_invite_code"):
+              vals.append(d.get(k) or "")
+          flag = (d.get("apex_flag") or "").strip()
+          if flag and flag != "apex":
+              vals.append(flag)
+          for k in ("aes_key", "path_prefix", "sub_prefix", "ext", "allowed_domains"):
+              v = mw.get(k)
+              if k == "ext" and isinstance(v, str) and len(v) < 6:
+                  v = ""  # .dat 之类太常见,遮了会把日志里的 GeoSite.dat 也抹掉
+              vals.append(v if isinstance(v, str) else (json.dumps(v) if v else ""))
+          out = set()
+          for v in vals:
+              for line in str(v).splitlines():
+                  line = line.strip()
+                  parts = [line] + [p.strip() for p in line.split(",")]
+                  for p in parts:
+                      if p.startswith(("http://", "https://")):
+                          h = urlsplit(p).hostname or ""
+                          if h:
+                              out.add(h)
+                      out.add(p)
+          for v in sorted(out, key=len, reverse=True):
+              if len(v) >= 4:
+                  print("::add-mask::" + v)
+          PYEOF
 
       - name: Configure git credentials
         env:
@@ -2324,7 +2364,9 @@ jobs:
           mkdir -p dist
 
           CFG="openwrt/etc/config/mihomo"
-          if [ "$ENABLE_ENCRYPTION" = "yes" ] && [ -n "$XOR_KEY" ]; then
+          # 有 apex-agent 的源码:密钥已编进程序(baked_gen.go),配置文件里不再放明文
+          # (ipk 是公开仓库的构建产物,谁都能下;2026-11-08 审计)。老源码的 shell 登录还要用它。
+          if [ "$ENABLE_ENCRYPTION" = "yes" ] && [ -n "$XOR_KEY" ] && [ ! -f openwrt/agent/go.mod ]; then
             INJ_KEY="$XOR_KEY"
           else
             INJ_KEY=""
