@@ -2431,7 +2431,22 @@ jobs:
             cp openwrt/etc/init.d/mihomo "$pkg/etc/init.d/mihomo"
             chmod 755 "$pkg/etc/init.d/mihomo"
             cp openwrt/etc/config/mihomo "$pkg/etc/config/mihomo"
-            cp openwrt/etc/mihomo/config.yaml "$pkg/etc/mihomo/config.yaml"
+            # 2026-11-10 起的源码:随包配置装成 default.yaml(运行用的 config.yaml 由 init 生成并注入密钥),
+            # 另带开机 / 联网的 hotplug 脚本;认法 = 源码里有那个 hotplug 文件。老 tag 照旧装 config.yaml。
+            if [ -f openwrt/etc/hotplug.d/iface/90-mihomo ]; then
+              cp openwrt/etc/mihomo/config.yaml "$pkg/etc/mihomo/default.yaml"
+              mkdir -p "$pkg/etc/hotplug.d/iface"
+              cp openwrt/etc/hotplug.d/iface/90-mihomo "$pkg/etc/hotplug.d/iface/90-mihomo"
+              chmod 755 "$pkg/etc/hotplug.d/iface/90-mihomo"
+              # 品牌名:LuCI 菜单 / 标题读 uci app_name,没有再读 /etc/mihomo/app_name。
+              APP_NAME="$APP_NAME" awk -v q="'" '
+                { print }
+                /^config mihomo .config.$/ && !done { print "\toption app_name " q ENVIRON["APP_NAME"] q; done=1 }
+              ' "$pkg/etc/config/mihomo" > "$pkg/etc/config/mihomo.tmp" && mv "$pkg/etc/config/mihomo.tmp" "$pkg/etc/config/mihomo"
+              printf '%s\n' "$APP_NAME" > "$pkg/etc/mihomo/app_name"
+            else
+              cp openwrt/etc/mihomo/config.yaml "$pkg/etc/mihomo/config.yaml"
+            fi
             cp openwrt/etc/uci-defaults/99-mihomo "$pkg/etc/uci-defaults/99-mihomo"
             chmod 755 "$pkg/etc/uci-defaults/99-mihomo"
             if [ -f "$UI_SRC/index.html" ]; then
