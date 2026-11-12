@@ -1512,7 +1512,7 @@ jobs:
           #   make_dmg <app_dir> <输出路径>
           make_dmg() {
           local APP_DIR="$1" DMG_OUTPUT="$2"
-          local APP_NAME_BUNDLE APP_NAME_NOAPP STAGING VOLNAME SPEC DMG_OK
+          local APP_NAME_BUNDLE APP_NAME_NOAPP STAGING VOLNAME SPEC DMG_OK GUIDE_NAME
           APP_NAME_BUNDLE=$(basename "$APP_DIR")
           APP_NAME_NOAPP="${APP_NAME_BUNDLE%.app}"
           STAGING=$(mktemp -d)
@@ -1560,6 +1560,20 @@ jobs:
             echo "—— 如有其他问题请联系技术支持"
           } > "$STAGING/安装教程.txt"
 
+          # 【2026-11-12 用户要求】别的软件 DMG 里放的是图文说明,换成按品牌名现画的 PNG
+          #(scripts/mac_install_guide.py)。画不出来(没字体 / Pillow 出错)就保留上面的 txt。
+          GUIDE_NAME="安装教程.txt"
+          if python3 .apex-build-tools/scripts/mac_install_guide.py "$APP_NAME_NOAPP" "$STAGING/安装说明.png" \
+               macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_1024.png \
+             && [ -s "$STAGING/安装说明.png" ]; then
+            rm -f "$STAGING/安装教程.txt"
+            GUIDE_NAME="安装说明.png"
+            echo "[dmg] 安装说明图: $(du -h "$STAGING/安装说明.png" | cut -f1)"
+          else
+            echo "::warning::安装说明图生成失败,DMG 里放 txt"
+            rm -f "$STAGING/安装说明.png"
+          fi
+
           VOLNAME="${APP_NAME_NOAPP}"
 
           echo "[dmg] Building DMG via appdmg..."
@@ -1575,7 +1589,7 @@ jobs:
             printf '  "icon-size": 120,\n'
             printf '  "window": { "size": { "width": 600, "height": 520 } },\n'
             printf '  "contents": [\n'
-            printf '    { "x": 300, "y": 130, "type": "file", "path": "%s/安装教程.txt" },\n' "$STAGING"
+            printf '    { "x": 300, "y": 130, "type": "file", "path": "%s/%s" },\n' "$STAGING" "$GUIDE_NAME"
             printf '    { "x": 165, "y": 330, "type": "file", "path": "%s/%s" },\n' "$STAGING" "$APP_NAME_BUNDLE"
             printf '    { "x": 435, "y": 330, "type": "link", "path": "/Applications" }\n'
             printf '  ]\n'
