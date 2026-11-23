@@ -2014,7 +2014,8 @@ jobs:
                   print(bid, os.path.relpath(path, sys.argv[1]).replace(os.sep, '/'))
           PYEOF
           mkdir -p symbols-enc
-          "$PY" "$T/sym_ids.py" build/symbols > "$T/sym_ids.txt"
+          # Windows 上 Python 输出 CRLF,不去 \r 会进文件名,tar 找不到文件
+          "$PY" "$T/sym_ids.py" build/symbols | tr -d '\r' > "$T/sym_ids.txt"
           cat "$T/sym_ids.txt"
           if [ ! -s "$T/sym_ids.txt" ]; then echo "::warning::有符号目录但一个构建号都没读出来"; exit 0; fi
           while read -r BID REL; do

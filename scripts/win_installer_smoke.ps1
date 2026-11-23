@@ -52,6 +52,26 @@ function PipeGet([string]$pipe, [string]$path) {
   } finally { $c.Dispose() }
 }
 
+# 失败时打印现场。公开仓库的日志:Inno 日志只留和服务/报错相关的行,不整份贴。
+function ShowInnoLog([string]$file) {
+  try {
+    "--- $(Split-Path -Leaf $file)"
+    if (-not (Test-Path -LiteralPath $file)) { '(没有这个日志)'; return }
+    Get-Content -LiteralPath $file | Where-Object { $_ -match 'helper service|not restoring|error|failed|unable|Exit code|Deferring|in use|Cannot|Failed to' } |
+      Select-Object -Last 60
+  } catch { "读日志失败: $_" }
+}
+function ShowServiceState([string]$name) {
+  try {
+    $s = Get-CimInstance Win32_Service -Filter "Name='$name'"
+    if ($s) { "--- 服务状态: State=$($s.State) ExitCode=$($s.ExitCode) ServiceSpecificExitCode=$($s.ServiceSpecificExitCode) ProcessId=$($s.ProcessId)" }
+    else { '--- 服务不存在' }
+    Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; StartTime = (Get-Date).AddMinutes(-15) } -MaxEvents 80 -ErrorAction SilentlyContinue |
+      Where-Object { $_.Message -match [regex]::Escape($name) } | Select-Object -First 10 |
+      ForEach-Object { "$($_.TimeCreated.ToString('HH:mm:ss')) id=$($_.Id) $($_.Message -replace '\s+', ' ')" }
+  } catch { "读服务状态失败: $_" }
+}
+
 $root = "C:\Apex CI\O'Brien’s [x] 测试"  # ’ 是 PowerShell 的另一种单引号(2026-11-08 审计)
 $log = Join-Path $env:RUNNER_TEMP 'apex-smoke'
 New-Item -ItemType Directory -Force -Path $log | Out-Null
@@ -117,6 +137,7 @@ if ($directUp) { Note '升级时结束了直跑的组件' ($direct.HasExited) '(
 if (-not $direct.HasExited) { Stop-Process -Id $direct.Id -Force -ErrorAction SilentlyContinue }
 if ($svcName) {
   # 2026-11-07 起升级保留服务(update_installer.iss RestoreHelperService);同版本覆盖时服务没被删,这里实际测的是停了之后重新启动
+  $failBeforeUpgradeChecks = $fail.Count
   Check '升级后 TUN 服务还在(不用重新授权)' ($null -ne (Get-Service $svcName -ErrorAction SilentlyContinue))
   Check '升级后 TUN 服务在跑' (Retry { (Get-Service $svcName).Status -eq 'Running' } 20)
   $r2 = ''
@@ -124,6 +145,7 @@ if ($svcName) {
   Check '升级后组件照常在管道上答话' ($r2 -match 'x-apex-helper-reject: exe_mismatch') $r2
   $p2 = (Get-CimInstance Win32_Service -Filter "Name='$svcName'").PathName
   Check '升级后服务命令行没变' ($p2 -eq $j.binPath) "got: $p2"
+  if ($fail.Count -gt $failBeforeUpgradeChecks) { ShowServiceState $svcName; ShowInnoLog (Join-Path $log 'upgrade.log') }
 }
 
 # ─── D. 卸载 ─────────────────────────────────────────────────────────────
@@ -132,6 +154,7 @@ $code = Run (Join-Path $root 'unins000.exe') "/VERYSILENT /SUPPRESSMSGBOXES /NOR
 # 第一段马上退出,真正干活的是带 /SECONDPHASE 的子进程
 Check '卸载跑完(卸载项消失)' (Retry { -not ($key -and (Test-Path $key)) } 180)
 Check '安装目录删掉了' (Retry { -not (Test-Path -LiteralPath $root) } 60) ((Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue | Select-Object -First 10 | ForEach-Object FullName) -join '; ')
+if ($fail -contains '安装目录删掉了') { ShowInnoLog (Join-Path $log 'uninstall.log') }
 if ($svcName) { Check '服务删掉了' (Retry { -not (Get-Service $svcName -ErrorAction SilentlyContinue) } 30) }
 Check '没有残留进程' (-not (Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith($root) }))
 
