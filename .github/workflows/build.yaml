@@ -1615,9 +1615,13 @@ jobs:
           echo "[dmg]   Output:      $DMG_OUTPUT"
 
           SPEC="$(mktemp -d)/appdmg.json"
+          # 安装盘图标 = App 自己的图标(2026-11-27 用户:"图标呢?" —— 挂载后桌面上是系统默认的灰色磁盘图标)。
+          VOLICON="$STAGING/$APP_NAME_BUNDLE/Contents/Resources/AppIcon.icns"
+          [ -f "$VOLICON" ] || { echo "::warning::没找到 $VOLICON,安装盘用系统默认图标"; VOLICON=""; }
           {
             printf '{\n'
             printf '  "title": "%s",\n' "$VOLNAME"
+            [ -n "$VOLICON" ] && printf '  "icon": "%s",\n' "$VOLICON"
             printf '  "icon-size": 120,\n'
             printf '  "window": { "size": { "width": 600, "height": 520 } },\n'
             printf '  "contents": [\n'
